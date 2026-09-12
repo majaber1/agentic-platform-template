@@ -1,6 +1,6 @@
 {
   "name": "agentic-platform-template",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
   "license": "MIT",
   "scripts": {
@@ -25,7 +25,5 @@
     "@types/react-dom": "^19.1.9",
     "typescript": "^5.9.2"
   },
-  "engines": {
-    "node": ">=20.9.0"
-  }
+  "engines": { "node": ">=20.9.0" }
 }

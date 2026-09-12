@@ -1,32 +1,26 @@
 # Core Runtime
 
 ## Phase 1 — LangGraph
-Implemented and production-tested:
-- real LangGraph state graph
-- scoped local tool registry
-- truthful OpenAI-compatible model-gateway adapter
-- runtime status + self-test APIs
-- runtime console
-- Promptfoo HTTP evaluation scaffold
+Production-tested: real LangGraph graph, scoped local tool registry, truthful OpenAI-compatible gateway adapter, runtime APIs/UI, Promptfoo scaffold.
 
 ## Phase 2 — MCP Core
-Implemented:
-- official MCP TypeScript SDK v2 client/server packages
-- real in-memory MCP protocol E2E for deterministic self-test
-- `mcp_platform_status` read-only MCP tool
-- LangGraph MCP route
-- approved remote MCP registry from `MCP_SERVERS_JSON`
-- remote Streamable HTTP probe by configured server ID only
-- no arbitrary request-supplied MCP URL
+Production-tested: official MCP v2 client/server protocol path, MCP tool discovery/call, LangGraph MCP route, governed remote MCP registry and Streamable HTTP probe.
 
-### Endpoints
-- `GET /api/mcp/selftest`
-- `GET /api/mcp/status`
-- `GET /api/mcp/probe?server=<configured-id>`
+## Phase 3 — Governed Actions
+Implemented:
+- request IDs on executions
+- read/write tool metadata
+- central execution policy gate
+- bounded HMAC approval verification for sensitive writes
+- fail-closed behavior when approval infrastructure is absent
+- policy self-test that proves deny-without-approval and accept-with-correct-bound approval without performing any write
+
+### E2E endpoints
 - `GET /api/runtime/selftest`
+- `GET /api/mcp/selftest`
+- `GET /api/policy/selftest`
+- `GET /api/runtime/status`
 - `POST /api/agent/run`
 
 ## Truthful boundaries
-The template does not ship a fake LLM. Without `MODEL_GATEWAY_BASE_URL` and `DEFAULT_MODEL`, model requests return `NOT_CONFIGURED`.
-
-External MCP servers are not Active unless they are explicitly supplied in `MCP_SERVERS_JSON`. Mem0, OpenLIT instrumentation, Browser Use, persistent business storage, authentication and write approvals remain governed later phases.
+A real LLM is not active until `MODEL_GATEWAY_BASE_URL` and `DEFAULT_MODEL` are configured. External MCP connectors are not active until `MCP_SERVERS_JSON` is configured. Persistent memory and an external observability collector are not active yet. No fallback is presented as production persistence.
