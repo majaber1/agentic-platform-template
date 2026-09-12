@@ -78,7 +78,11 @@ jobs:
           FORGE_ALLOW_OPEN_SIGNUP: "true"
         run: |
           set -euo pipefail
-          TESTS=(apps/api/tests/test_auth.py apps/api/tests/test_channels_hitl.py)
+          TESTS=(
+            apps/api/tests/test_auth.py
+            apps/api/tests/test_channels_hitl.py
+            apps/api/tests/test_project_run_endpoint.py
+          )
           while IFS= read -r f; do TESTS+=("$f"); done < <(find apps/api/tests -maxdepth 1 -type f -iname '*mcp*.py' | sort)
           printf 'Running %s\n' "${TESTS[@]}"
           pytest -q "${TESTS[@]}"
@@ -131,6 +135,60 @@ jobs:
             -H "Authorization: Bearer $TOKEN" >/tmp/models.json
           grep -q 'fake:echo' /tmp/models.json
 
+      - name: Live fake-agent workflow E2E
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, httpx
+          base = 'http://127.0.0.1:8000'
+          login = httpx.post(f'{base}/v1/auth/login', json={
+              'email':'acceptance@forge.local','password':'AcceptancePass123!'
+          }, timeout=20)
+          login.raise_for_status()
+          h = {'Authorization': f"Bearer {login.json()['access_token']}"}
+          pid = json.load(open('/tmp/project.json'))['id']
+          wf = {
+              'id':'v05_live_agent','version':1,
+              'state':{'messages':{'type':'list[message]','reducer':'add_messages'}},
+              'entry_node':'agent',
+              'nodes':[
+                  {'id':'agent','type':'agent','config':{'flavor':'agent','model':'fake:V0.5 live agent PASS','tools':[]}},
+                  {'id':'end','type':'end','config':{}}
+              ],
+              'edges':[{'source':'agent','target':'end'}]
+          }
+          r = httpx.post(f'{base}/v1/projects/{pid}/workflows', json={
+              'name':'v0.5 Live Agent','description':'Acceptance E2E','executable':wf
+          }, headers=h, timeout=20)
+          assert r.status_code == 201, r.text
+          created = r.json(); wid = created['id']
+          json.dump(created, open('/tmp/workflow.json','w'))
+          r = httpx.patch(f'{base}/v1/projects/{pid}', json={
+              'config':{'api_workflow_id':wid,'default_model':'fake:echo'}
+          }, headers=h, timeout=20)
+          assert r.status_code == 200, r.text
+          r = httpx.post(f'{base}/v1/projects/{pid}/run', json={
+              'input':{'messages':[{'role':'user','content':'Run live acceptance'}]}, 'stream':False
+          }, headers=h, timeout=30)
+          assert r.status_code == 200, r.text
+          out = r.json()
+          assert out.get('status') == 'done', out
+          assert 'V0.5 live agent PASS' in (out.get('answer') or ''), out
+          tid = out.get('thread_id'); assert tid, out
+          json.dump(out, open('/tmp/live-run.json','w'))
+          r2 = httpx.post(f'{base}/v1/projects/{pid}/run', json={
+              'thread_id':tid,
+              'input':{'messages':[{'role':'user','content':'Continue same thread'}]},
+              'stream':False
+          }, headers=h, timeout=30)
+          assert r2.status_code == 200, r2.text
+          assert r2.json().get('thread_id') == tid, r2.json()
+          reopen = httpx.get(f'{base}/v1/projects/{pid}/workflows/{wid}', headers=h, timeout=20)
+          assert reopen.status_code == 200, reopen.text
+          assert reopen.json()['name'] == 'v0.5 Live Agent'
+          print('LIVE_FAKE_AGENT_E2E_PASS', wid, tid)
+          PY
+
       - name: Start Forge web
         working-directory: vendor/forge
         shell: bash
@@ -170,6 +228,29 @@ jobs:
           PY
           python /tmp/browser_smoke.py
 
+      - name: Start pinned LiteLLM router and verify health
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name v05-litellm-router \
+            -p 4000:4000 \
+            -v "$PWD/config/litellm/config.v05.yaml:/app/config.yaml:ro" \
+            -e LITELLM_MASTER_KEY=sk-v05-acceptance-router \
+            -e GROQ_API_KEY="${GROQ_API_KEY:-dummy-groq-key}" \
+            -e OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-dummy-openrouter-key}" \
+            ghcr.io/berriai/litellm:v1.100.1 \
+            --config=/app/config.yaml --port=4000
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:4000/health/liveliness >/tmp/router-health.json; then
+              cat /tmp/router-health.json
+              docker inspect v05-litellm-router --format '{{.Config.Image}}' >/tmp/router-image.txt
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs v05-litellm-router | tee /tmp/router.log
+          exit 1
+
       - name: Provider secret availability
         shell: bash
         run: |
@@ -189,5 +270,10 @@ jobs:
             /tmp/project.json
             /tmp/projects.json
             /tmp/models.json
+            /tmp/workflow.json
+            /tmp/live-run.json
+            /tmp/router-health.json
+            /tmp/router-image.txt
+            /tmp/router.log
             /tmp/provider-status.txt
           if-no-files-found: ignore
