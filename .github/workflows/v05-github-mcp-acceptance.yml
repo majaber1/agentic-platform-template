@@ -1,0 +1,142 @@
+name: v0.5 GitHub MCP Acceptance
+
+on:
+  push:
+    branches: [v0.5-open-source-first]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+env:
+  FORGE_SHA: 048fdc658527b0dd60babbb65ee5729e3af1a79d
+  GITHUB_MCP_IMAGE: ghcr.io/github/github-mcp-server:v1.12.1
+  FORGE_ENVIRONMENT: development
+  FORGE_AUTH_REQUIRED: "true"
+  FORGE_ALLOW_OPEN_SIGNUP: "false"
+  FORGE_JWT_SECRET: acceptance-only-jwt-secret-change-me-1234567890
+  FORGE_BOOTSTRAP_ADMIN_EMAIL: acceptance@forge.local
+  FORGE_BOOTSTRAP_ADMIN_PASSWORD: AcceptancePass123!
+  FORGE_DEFAULT_MODEL: fake:echo
+  FORGE_ENABLE_MCP_STDIO: "true"
+  FORGE_MCP_STDIO_ALLOWED_COMMANDS: docker
+  GITHUB_PERSONAL_ACCESS_TOKEN: ${{ github.token }}
+
+jobs:
+  github-mcp-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout template branch
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Forge upstream
+        uses: actions/checkout@v4
+        with:
+          repository: nihalashetty/Forge
+          ref: ${{ env.FORGE_SHA }}
+          path: vendor/forge
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: vendor/forge/apps/api/pyproject.toml
+
+      - name: Install Forge backend
+        working-directory: vendor/forge/apps/api
+        run: python -m pip install -U pip && pip install -e ".[dev,all]"
+
+      - name: Pull official GitHub MCP image
+        run: docker pull "$GITHUB_MCP_IMAGE"
+
+      - name: Start Forge API with bounded MCP stdio
+        working-directory: vendor/forge/apps/api
+        shell: bash
+        run: |
+          nohup uvicorn forge.main:app --host 127.0.0.1 --port 8000 > /tmp/forge-api.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:8000/readyz >/tmp/ready.json; then cat /tmp/ready.json; exit 0; fi
+            sleep 2
+          done
+          cat /tmp/forge-api.log
+          exit 1
+
+      - name: Register and exercise official GitHub MCP through Forge
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, httpx
+
+          base='http://127.0.0.1:8000'
+          login=httpx.post(f'{base}/v1/auth/login', json={
+              'email':'acceptance@forge.local','password':'AcceptancePass123!'
+          }, timeout=20)
+          login.raise_for_status()
+          h={'Authorization': f"Bearer {login.json()['access_token']}"}
+
+          p=httpx.post(f'{base}/v1/projects', json={'name':'v0.5 GitHub MCP Acceptance'}, headers=h, timeout=20)
+          p.raise_for_status(); pid=p.json()['id']
+
+          client_payload={
+              'name':'github-official-readonly',
+              'transport':'stdio',
+              'command':'docker',
+              'args':{'args':[
+                  'run','-i','--rm',
+                  '-e','GITHUB_PERSONAL_ACCESS_TOKEN',
+                  'ghcr.io/github/github-mcp-server:v1.12.1',
+                  'stdio',
+                  '--read-only',
+                  '--tools=get_file_contents,pull_request_read,get_me'
+              ]}
+          }
+          c=httpx.post(f'{base}/v1/projects/{pid}/mcp-clients', json=client_payload, headers=h, timeout=20)
+          c.raise_for_status(); cid=c.json()['id']
+
+          d=httpx.get(f'{base}/v1/projects/{pid}/mcp-clients/{cid}/tools', headers=h, timeout=90)
+          d.raise_for_status(); discovery=d.json()
+          assert discovery.get('ok') is True, discovery
+          tools=discovery.get('tools') or []
+          names={t.get('name') for t in tools}
+          assert 'get_file_contents' in names, names
+          assert not any(n in names for n in {'create_or_update_file','delete_file','create_pull_request','merge_pull_request'}), names
+          json.dump(discovery, open('/tmp/github-mcp-tools.json','w'), indent=2)
+
+          tool_payload={
+              'name':'github_get_file_contents',
+              'kind':'mcp',
+              'config':{
+                  'description':'Read a file from GitHub through the official GitHub MCP server in read-only mode.',
+                  'mcp_client_id':cid,
+                  'remote_tool_name':'get_file_contents',
+                  'timeout_seconds':30
+              }
+          }
+          t=httpx.post(f'{base}/v1/projects/{pid}/tools', json=tool_payload, headers=h, timeout=20)
+          t.raise_for_status(); tid=t.json()['id']
+
+          args={'owner':'majaber1','repo':'agentic-platform-template','path':'README.md','ref':'v0.5-open-source-first'}
+          r=httpx.post(f'{base}/v1/projects/{pid}/tools/{tid}/test', json={'args':args,'context':{}}, headers=h, timeout=90)
+          r.raise_for_status(); result=r.json()
+          json.dump(result, open('/tmp/github-mcp-result.json','w'), indent=2)
+          text=json.dumps(result)
+          assert 'Agentic Platform Template' in text, text[:2000]
+          assert 'open-source-first' in text, text[:2000]
+          print('GITHUB_MCP_FORGE_E2E_PASS', cid, tid, len(tools))
+          PY
+
+      - name: Collect GitHub MCP evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v05-github-mcp-evidence
+          path: |
+            /tmp/ready.json
+            /tmp/forge-api.log
+            /tmp/github-mcp-tools.json
+            /tmp/github-mcp-result.json
+          if-no-files-found: ignore
