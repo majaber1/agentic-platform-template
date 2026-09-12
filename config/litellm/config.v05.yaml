@@ -1,0 +1,21 @@
+model_list:
+  # Provider wildcards: callers choose the concrete model at runtime.
+  # Examples: groq/<model-id> or openrouter/<model-id>.
+  - model_name: "groq/*"
+    litellm_params:
+      model: "groq/*"
+      api_key: os.environ/GROQ_API_KEY
+
+  - model_name: "openrouter/*"
+    litellm_params:
+      model: "openrouter/*"
+      api_key: os.environ/OPENROUTER_API_KEY
+
+litellm_settings:
+  drop_params: true
+  num_retries: 2
+  request_timeout: 60
+  telemetry: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
