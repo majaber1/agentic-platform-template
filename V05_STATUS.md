@@ -2,39 +2,82 @@
 
 Version: **0.5.0-open-source-first**
 Branch: `v0.5-open-source-first`
-Production status: **NOT DEPLOYED / NOT CLAIMED READY**
+Production status: **NOT DEPLOYED / NOT CLAIMED PRODUCTION READY**
 
-## Completed in this version
+## Frozen upstream foundation
 
-- v0.4 preserved at `release/v0.4-governed-runtime`.
-- Forge selected as the platform foundation and pinned to immutable commit `048fdc658527b0dd60babbb65ee5729e3af1a79d`.
-- Forge MIT license verified before adoption.
-- LiteLLM OSS core selected as model router and pinned to release `v1.100.1` / commit `1dba17b10ded12ad0021edb453ba2c54e4637928`.
-- LiteLLM license boundary recorded: MIT outside `enterprise/`; enterprise code is not part of the adopted surface.
-- Groq and OpenRouter wildcard routes configured through LiteLLM.
-- Windows and Linux/macOS bootstrap scripts added for reproducible upstream checkouts.
-- Windows and Linux/macOS local Forge run scripts added.
-- Windows and Linux/macOS LiteLLM router run scripts added.
-- Vendor checkouts and local secret files are excluded from Git.
-- v0.5 architecture freezes reuse-first rules and removes default duplication of memory/workflow/observability subsystems.
+- v0.4 is preserved at `release/v0.4-governed-runtime` and remains the `main`/production baseline until v0.5 merge is explicitly approved.
+- Forge is the agent-platform foundation, pinned to commit `048fdc658527b0dd60babbb65ee5729e3af1a79d` (MIT).
+- LiteLLM OSS core is the model router, pinned to `v1.100.1` / commit `1dba17b10ded12ad0021edb453ba2c54e4637928`.
+- GitHub MCP Server is the first accepted external MCP connector, pinned to `v1.12.1` / commit `7d13a7ad6f2a17f351a6d77ce280c85ae1821f4d` and container digest `sha256:0ba840c46a237879c8300e7fddb0b6347f20e029ccb9cbe2ce4a943daa1ff560`.
+- Open Source First remains mandatory: reuse and customize proven components before writing replacements.
 
-## Not yet claimed as PASS
+## Acceptance results
 
-These require a real runtime on a machine with Docker and, where applicable, provider keys:
+### Forge foundation — PASS
 
-1. Forge Docker stack boot from the pinned commit.
-2. Forge console login and project creation.
-3. Offline `fake:echo` agent run.
-4. Workflow save/reopen persistence.
-5. MCP list/call E2E.
-6. HITL pause/resume E2E.
-7. LiteLLM container health.
-8. Real Groq route.
-9. Real OpenRouter route.
-10. Forge -> LiteLLM routed model call.
-11. Trace/tool/model evidence for the routed call.
+GitHub Actions run `34720079559` completed successfully.
 
-Until these pass, v0.5 is an **implementation candidate**, not production-ready.
+- Pinned Forge SHA + MIT license verification — PASS.
+- Backend high-value suite — **71/71 PASS** (auth, MCP, HITL coverage, project-run coverage).
+- Frontend tests — **4/4 PASS**.
+- Next.js production build — PASS.
+- Forge API `/readyz` — PASS (`db`, `checkpointer`, `vector_store`).
+- Authenticated API login — PASS.
+- Project creation + reopen/persistence — PASS.
+- Live `fake:echo` workflow execution — PASS.
+- Same-thread continuation — PASS.
+- Workflow save/reopen — PASS.
+- Browser login + owner dashboard smoke — PASS.
+
+### LiteLLM router — PASS for router/runtime, live providers pending
+
+GitHub Actions run `34720079544` completed successfully.
+
+- Pinned LiteLLM `v1.100.1` container boot — PASS.
+- Router health/liveness — PASS.
+- Groq wildcard route loaded — PASS.
+- OpenRouter wildcard route loaded — PASS.
+
+This does **not** claim a paid/live provider request. No authorized Groq/OpenRouter provider keys were available in the acceptance environment.
+
+### Official GitHub MCP — PASS for real read-only data access
+
+GitHub Actions run `34722075068` completed successfully.
+
+- Official `github/github-mcp-server` `v1.12.1` image/digest verification — PASS.
+- Forge stdio command bounded to `docker` — PASS.
+- GitHub MCP launched with native `--read-only` mode — PASS.
+- Tool surface bounded to exactly `get_file_contents`, `pull_request_read`, and `get_me` — PASS.
+- Write tools absent from discovery — PASS.
+- Real `get_file_contents` call through the Forge MCP adapter — PASS.
+- Real repository evidence returned from `majaber1/agentic-platform-template` / `README.md` on `v0.5-open-source-first` — PASS.
+- Forge agent workflow compiled and ran with the GitHub MCP client attached through the native `mcp_servers` path — PASS.
+- Acceptance credential file was temporary, mode `0600`, excluded from artifacts, and deleted at job end — PASS.
+
+Important integration finding: the pinned Forge stdio connection currently passes `command + args` but does not expose an MCP subprocess `env` field. For CI acceptance, the credential is injected into the nested official GitHub MCP container through a protected temporary Docker `--env-file`, without storing the token in Git or connector configuration. Production credential handling for stdio must remain external/secret-managed, or the remote GitHub MCP + Forge Auth Provider path should be selected and separately accepted.
+
+## Still blocked / not yet claimed as PASS
+
+1. Real Groq inference through LiteLLM.
+2. Real OpenRouter inference through LiteLLM.
+3. Forge -> LiteLLM -> live provider response E2E.
+4. Live model autonomously selecting and invoking the GitHub MCP tool.
+5. Combined trace proving model call + MCP tool call + final answer in one live agent run.
+6. Live user-visible HITL pause -> approve/reject -> resume E2E (upstream HITL tests pass, but this runtime gate has not yet been exercised as a full user flow).
+7. Provider failure/fallback E2E (for example Groq unavailable -> OpenRouter route).
+8. Production deployment/promotion of v0.5.
+
+The `fake:*` model proves the Forge agent runtime and native MCP attachment path, but it does not prove autonomous tool selection. A real tool-capable model is required for that gate.
+
+## Current readiness decision
+
+- **Open-source foundation:** PASS.
+- **Forge runtime:** PASS.
+- **LiteLLM routing runtime:** PASS.
+- **Official GitHub MCP real read-only connector:** PASS.
+- **Live provider / autonomous agent-tool loop:** BLOCKED by missing authorized provider credentials, not failed.
+- **Production merge/deploy:** HOLD until the remaining live-provider and user-visible HITL gates are evidenced or explicitly waived by an architecture/release decision.
 
 ## Local test sequence
 
@@ -56,12 +99,12 @@ Linux/macOS:
 
 Then validate Forge at `http://localhost:3000`, Forge API at `http://localhost:8000/docs`, and LiteLLM at `http://localhost:4000`.
 
-## Provider keys
+## Provider secrets
 
-Real keys belong only in local `.env.router` or a production secret store:
+Real provider secrets belong only in an approved local secret file or production secret store, never in Git or chat:
 
 - `GROQ_API_KEY`
 - `OPENROUTER_API_KEY`
 - `LITELLM_MASTER_KEY`
 
-No provider model ID is hardcoded into architecture. Concrete models are selected at runtime and may change without changing the platform baseline.
+No provider model ID is part of the architecture baseline. Concrete models remain runtime configuration and can change without changing the platform architecture.
