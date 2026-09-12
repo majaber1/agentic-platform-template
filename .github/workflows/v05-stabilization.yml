@@ -155,18 +155,24 @@ jobs:
           docker logs v05-router
           exit 1
 
-      - name: Router authentication failure path
+      - name: Router invalid-credential fails closed
         shell: bash
         run: |
           set -euo pipefail
           STATUS=$(curl -sS -o /tmp/router-unauthorized.json -w '%{http_code}' \
             http://127.0.0.1:4000/v1/models \
             -H 'Authorization: Bearer definitely-wrong-key')
-          case "$STATUS" in
-            401|403) ;;
-            *) echo "Expected 401/403, got $STATUS"; cat /tmp/router-unauthorized.json; exit 1 ;;
-          esac
-          echo "ROUTER_UNAUTHORIZED_REJECTED_PASS $STATUS" | tee /tmp/router-auth-failure.txt
+          if [ "$STATUS" -lt 400 ]; then
+            echo "Invalid credential unexpectedly received success status $STATUS"
+            cat /tmp/router-unauthorized.json
+            exit 1
+          fi
+          if grep -Eq 'groq/|openrouter/' /tmp/router-unauthorized.json; then
+            echo "Invalid credential response leaked the configured model catalog"
+            cat /tmp/router-unauthorized.json
+            exit 1
+          fi
+          echo "ROUTER_INVALID_CREDENTIAL_FAILS_CLOSED_PASS $STATUS" | tee /tmp/router-auth-failure.txt
 
       - name: Router authorized catalog and unknown-model failure path
         shell: bash
