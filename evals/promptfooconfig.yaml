@@ -1,0 +1,30 @@
+description: Agentic Platform Phase 1 runtime evaluation
+
+prompts:
+  - "{{prompt}}"
+
+providers:
+  - id: http
+    config:
+      url: "{{env.RUNTIME_BASE_URL | default('http://localhost:3000')}}/api/agent/run"
+      method: POST
+      headers:
+        Content-Type: application/json
+      body:
+        message: "{{prompt}}"
+      transformResponse: "json.output"
+
+cases:
+  - vars:
+      prompt: platform status
+    assert:
+      - type: contains
+        value: phase1-core-runtime
+      - type: contains
+        value: LangGraph
+
+  - vars:
+      prompt: runtime status
+    assert:
+      - type: contains
+        value: Tool Registry
