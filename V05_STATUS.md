@@ -57,9 +57,16 @@ GitHub Actions run `34722075068` completed successfully.
 
 Important integration finding: the pinned Forge stdio connection currently passes `command + args` but does not expose an MCP subprocess `env` field. For CI acceptance, the credential is injected into the nested official GitHub MCP container through a protected temporary Docker `--env-file`, without storing the token in Git or connector configuration. Production credential handling for stdio must remain external/secret-managed, or the remote GitHub MCP + Forge Auth Provider path should be selected and separately accepted.
 
+## Known blocker carried forward — no re-analysis required
+
+- **Groq credential:** Saudi Business already uses a working `GROQ_API_KEY`; reuse of the same account/key for `agentic-platform-template` is the selected path. The secret value has **not yet been copied** into this repository's approved secret store.
+- **Owner action:** add the existing Saudi Business Groq key as `GROQ_API_KEY` for this project when available. Do not put the value in Git, logs, PR comments, or chat.
+- **Status:** OPEN / DEFERRED BY OWNER. This is a credential-wiring blocker only; it is not an architecture or implementation blocker.
+- When the secret is added, resume directly at: **Forge -> LiteLLM -> Groq live inference -> autonomous GitHub MCP tool selection -> final traced answer**.
+
 ## Still blocked / not yet claimed as PASS
 
-1. Real Groq inference through LiteLLM.
+1. Real Groq inference through LiteLLM — **deferred until the existing Saudi Business Groq secret is wired here**.
 2. Real OpenRouter inference through LiteLLM.
 3. Forge -> LiteLLM -> live provider response E2E.
 4. Live model autonomously selecting and invoking the GitHub MCP tool.
@@ -78,6 +85,15 @@ The `fake:*` model proves the Forge agent runtime and native MCP attachment path
 - **Official GitHub MCP real read-only connector:** PASS.
 - **Live provider / autonomous agent-tool loop:** BLOCKED by missing authorized provider credentials, not failed.
 - **Production merge/deploy:** HOLD until the remaining live-provider and user-visible HITL gates are evidenced or explicitly waived by an architecture/release decision.
+
+## Current stabilization phase
+
+While the provider credential is deferred, v0.5 work continues on items that do not require it:
+
+1. dependency reproducibility / pinning evidence;
+2. failure-path gates for unavailable/invalid provider and unavailable MCP;
+3. HITL runtime acceptance using deterministic/offline paths where possible;
+4. freeze-readiness checklist and clean-diff verification.
 
 ## Local test sequence
 
