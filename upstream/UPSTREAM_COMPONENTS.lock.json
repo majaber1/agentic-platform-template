@@ -28,6 +28,26 @@
       "adoption_mode": "upstream-container-plus-config",
       "target_path": "vendor/litellm",
       "update_policy": "manual release review + provider routing regression before pin change"
+    },
+    {
+      "name": "GitHub MCP Server",
+      "role": "reference-external-mcp-connector",
+      "repository": "https://github.com/github/github-mcp-server.git",
+      "release": "v1.12.1",
+      "ref_type": "commit",
+      "ref": "7d13a7ad6f2a17f351a6d77ce280c85ae1821f4d",
+      "container_image": "ghcr.io/github/github-mcp-server:v1.12.1",
+      "container_digest": "sha256:0ba840c46a237879c8300e7fddb0b6347f20e029ccb9cbe2ce4a943daa1ff560",
+      "license": "MIT",
+      "license_scope": "entire upstream repository at pinned release",
+      "adoption_mode": "official-container-read-only-tool-allowlist",
+      "accepted_tools": [
+        "get_file_contents",
+        "pull_request_read",
+        "get_me"
+      ],
+      "security_profile": "read-only; stdio command allow-listed to docker; credentials external to Git and connector config",
+      "update_policy": "manual release review + real read-only MCP E2E before pin change"
     }
   ],
   "not_adopted_by_default": [
