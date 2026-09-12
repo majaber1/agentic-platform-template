@@ -73,6 +73,9 @@ jobs:
       - name: Backend high-value tests
         working-directory: vendor/forge
         shell: bash
+        env:
+          FORGE_AUTH_REQUIRED: "false"
+          FORGE_ALLOW_OPEN_SIGNUP: "true"
         run: |
           set -euo pipefail
           TESTS=(apps/api/tests/test_auth.py apps/api/tests/test_channels_hitl.py)
