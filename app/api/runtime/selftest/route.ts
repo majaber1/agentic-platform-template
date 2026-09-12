@@ -1,4 +1,4 @@
-import { runAgent } from "../../../../../lib/runtime/graph";
+import { runAgent } from "../../../../lib/runtime/graph";
 
 export const dynamic = "force-dynamic";
 
