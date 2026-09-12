@@ -1,0 +1,62 @@
+name: v0.5 Router Smoke
+
+on:
+  push:
+    branches: [v0.5-open-source-first]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  router-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start pinned LiteLLM router
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name v05-litellm-router \
+            -p 4000:4000 \
+            -v "$PWD/config/litellm/config.v05.yaml:/app/config.yaml:ro" \
+            -e LITELLM_MASTER_KEY=sk-v05-smoke-only \
+            -e GROQ_API_KEY=dummy-groq-smoke \
+            -e OPENROUTER_API_KEY=dummy-openrouter-smoke \
+            ghcr.io/berriai/litellm:v1.100.1 \
+            --config=/app/config.yaml --port=4000
+
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:4000/health/liveliness > router-health.json; then
+              break
+            fi
+            sleep 2
+          done
+
+          test -s router-health.json
+          cat router-health.json
+          docker inspect v05-litellm-router --format '{{.Config.Image}}' | tee router-image.txt
+          grep -q 'v1.100.1' router-image.txt
+
+      - name: Verify configured provider routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS http://127.0.0.1:4000/v1/models \
+            -H 'Authorization: Bearer sk-v05-smoke-only' > router-models.json
+          cat router-models.json
+          grep -q 'groq/' router-models.json
+          grep -q 'openrouter/' router-models.json
+
+      - name: Collect router evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v05-router-evidence
+          path: |
+            router-health.json
+            router-image.txt
+            router-models.json
+          if-no-files-found: ignore
