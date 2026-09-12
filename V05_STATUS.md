@@ -57,6 +57,25 @@ GitHub Actions run `34722075068` completed successfully.
 
 Important integration finding: the pinned Forge stdio connection currently passes `command + args` but does not expose an MCP subprocess `env` field. For CI acceptance, the credential is injected into the nested official GitHub MCP container through a protected temporary Docker `--env-file`, without storing the token in Git or connector configuration. Production credential handling for stdio must remain external/secret-managed, or the remote GitHub MCP + Forge Auth Provider path should be selected and separately accepted.
 
+### Stabilization / reproducibility / failure paths — PASS
+
+GitHub Actions run `34726730553` completed successfully on commit `124927ed7f8f7b5ce251bc59121f1b056ce6c4df`.
+
+- Forge source pin and MIT license — PASS.
+- Python 3.11.16 resolved graph snapshot — **194 packages**.
+- `pip check` — PASS (`No broken requirements found`).
+- High-value error/security/HITL suite — **63/63 PASS**.
+- Frontend `pnpm install --frozen-lockfile` — PASS with no lockfile mutation.
+- Forge dependency input fingerprints captured:
+  - `apps/api/pyproject.toml`: `29299923b5600bffe986b01a68504e78ef5aabe44dacd5f3a11b31dc9167b684`
+  - `pnpm-lock.yaml`: `00e068aa818ae8914d6f38c6068bc56d1158940f1b5b252444615bcb4017b8cd`
+- Router tracked config contains environment references, not provider secret values — PASS.
+- Invalid LiteLLM credential fails closed — PASS (HTTP 400 in pinned no-DB mode, no Groq/OpenRouter catalog leakage).
+- Unknown model route fails closed — PASS (HTTP 400).
+- Pinned LiteLLM image ID in this run: `sha256:0d61dd59943a26ec8eaeda0d6adafd7297d5cb9be0ccb44569553116286605de`.
+
+The first stabilization attempt expected only 401/403 for an invalid master key. The pinned no-DB LiteLLM runtime correctly rejected it with HTTP 400 (`no_db_connection`) instead. The gate was corrected to validate the actual security invariant: invalid credentials must receive an error and must not obtain the configured model catalog. The corrected gate passed.
+
 ## Known blocker carried forward — no re-analysis required
 
 - **Groq credential:** Saudi Business already uses a working `GROQ_API_KEY`; reuse of the same account/key for `agentic-platform-template` is the selected path. The secret value has **not yet been copied** into this repository's approved secret store.
@@ -71,7 +90,7 @@ Important integration finding: the pinned Forge stdio connection currently passe
 3. Forge -> LiteLLM -> live provider response E2E.
 4. Live model autonomously selecting and invoking the GitHub MCP tool.
 5. Combined trace proving model call + MCP tool call + final answer in one live agent run.
-6. Live user-visible HITL pause -> approve/reject -> resume E2E (upstream HITL tests pass, but this runtime gate has not yet been exercised as a full user flow).
+6. **Live user-visible HITL pause -> approve/reject -> resume E2E** — this is the current active gate.
 7. Provider failure/fallback E2E (for example Groq unavailable -> OpenRouter route).
 8. Production deployment/promotion of v0.5.
 
@@ -83,17 +102,20 @@ The `fake:*` model proves the Forge agent runtime and native MCP attachment path
 - **Forge runtime:** PASS.
 - **LiteLLM routing runtime:** PASS.
 - **Official GitHub MCP real read-only connector:** PASS.
+- **Stabilization / failure-path gate:** PASS.
 - **Live provider / autonomous agent-tool loop:** BLOCKED by missing authorized provider credentials, not failed.
+- **User-visible HITL:** IN PROGRESS.
 - **Production merge/deploy:** HOLD until the remaining live-provider and user-visible HITL gates are evidenced or explicitly waived by an architecture/release decision.
 
-## Current stabilization phase
+## Current phase
 
-While the provider credential is deferred, v0.5 work continues on items that do not require it:
+Provider credentials are deferred by the owner. Work continues with **HITL runtime E2E** using deterministic/offline paths:
 
-1. dependency reproducibility / pinning evidence;
-2. failure-path gates for unavailable/invalid provider and unavailable MCP;
-3. HITL runtime acceptance using deterministic/offline paths where possible;
-4. freeze-readiness checklist and clean-diff verification.
+1. real workflow reaches `human_input` and pauses;
+2. approve resumes the same run/thread and persists the terminal state;
+3. reject follows the bounded reject path;
+4. reopen/refresh preserves state;
+5. duplicate or late approval cannot double-execute.
 
 ## Local test sequence
 
