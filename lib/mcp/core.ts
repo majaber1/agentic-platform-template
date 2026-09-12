@@ -11,7 +11,7 @@ function extractText(content: unknown) {
 }
 
 export async function runMcpCoreSelfTest() {
-  const server = new McpServer({ name: "agentic-platform-template", version: "0.3.0" });
+  const server = new McpServer({ name: "agentic-platform-template", version: "0.4.0" });
   server.registerTool(
     "mcp_platform_status",
     {
@@ -23,7 +23,7 @@ export async function runMcpCoreSelfTest() {
     })
   );
 
-  const client = new Client({ name: "agentic-platform-selftest", version: "0.3.0" });
+  const client = new Client({ name: "agentic-platform-selftest", version: "0.4.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
   try {
@@ -32,7 +32,10 @@ export async function runMcpCoreSelfTest() {
     const listed = await client.listTools();
     const result = await client.callTool({ name: "mcp_platform_status", arguments: {} });
     const text = extractText(result.content);
-    const passed = listed.tools.some((tool) => tool.name === "mcp_platform_status") && text.includes("phase2-mcp-core");
+    let payload: { service?: string; architecture?: string; components?: { name?: string; state?: string }[] } = {};
+    try { payload = JSON.parse(text); } catch { payload = {}; }
+    const mcpActive = payload.components?.some((component) => component.name === "MCP Core" && component.state === "ACTIVE") ?? false;
+    const passed = listed.tools.some((tool) => tool.name === "mcp_platform_status") && payload.service === "agentic-platform-template" && payload.architecture === "baseline-v1" && mcpActive;
 
     return {
       passed,
