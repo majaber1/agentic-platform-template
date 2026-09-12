@@ -7,7 +7,7 @@ type RuntimeStatus = { runtime: string; components: RuntimeComponent[]; tools: {
 
 export default function RuntimeClient() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
-  const [message, setMessage] = useState("platform status");
+  const [message, setMessage] = useState("mcp status");
   const [result, setResult] = useState("Run the workflow to see the real trace.");
   const [busy, setBusy] = useState(false);
 
@@ -45,9 +45,9 @@ export default function RuntimeClient() {
 
       <section className="runtimeConsole">
         <div>
-          <div className="eyebrow">REAL LANGGRAPH E2E</div>
+          <div className="eyebrow">REAL LANGGRAPH + MCP E2E</div>
           <h2>Run the core runtime</h2>
-          <p className="muted">Try <code>platform status</code>. That route executes the real LangGraph workflow and scoped status tool. A normal AI question intentionally returns NOT_CONFIGURED until a real gateway/model is connected.</p>
+          <p className="muted">Try <code>mcp status</code> for LangGraph → official MCP client/server → registered tool, or <code>platform status</code> for the local scoped tool. Normal AI questions require a real configured model gateway.</p>
           <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={5} />
           <button className="button primary runtimeButton" onClick={run} disabled={busy}>{busy ? "Running…" : "Run workflow"}</button>
         </div>
@@ -55,7 +55,7 @@ export default function RuntimeClient() {
       </section>
 
       <section className="section runtimeTools">
-        <div className="eyebrow">TOOL REGISTRY</div>
+        <div className="eyebrow">LOCAL TOOL REGISTRY</div>
         <h2>Only explicitly registered tools are exposed.</h2>
         {(runtime?.tools ?? []).map((tool) => <div className="toolRow" key={tool.name}><code>{tool.name}</code><span>{tool.mode}</span><p>{tool.description}</p></div>)}
       </section>
