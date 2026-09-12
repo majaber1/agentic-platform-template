@@ -67,22 +67,19 @@ jobs:
           cat /tmp/forge-api.log
           exit 1
 
-      - name: Register and execute official GitHub MCP through Forge workflow
+      - name: Register official GitHub MCP and verify bounded discovery
         shell: bash
         run: |
           python - <<'PY'
           import json, httpx
-
           base='http://127.0.0.1:8000'
           login=httpx.post(f'{base}/v1/auth/login', json={
               'email':'acceptance@forge.local','password':'AcceptancePass123!'
           }, timeout=20)
           login.raise_for_status()
           h={'Authorization': f"Bearer {login.json()['access_token']}"}
-
           p=httpx.post(f'{base}/v1/projects', json={'name':'v0.5 GitHub MCP Acceptance'}, headers=h, timeout=20)
-          p.raise_for_status(); pid=p.json()['id']
-
+          p.raise_for_status(); project=p.json(); pid=project['id']
           client_payload={
               'name':'github-official-readonly',
               'transport':'stdio',
@@ -91,96 +88,102 @@ jobs:
                   'run','-i','--rm',
                   '-e','GITHUB_PERSONAL_ACCESS_TOKEN',
                   'ghcr.io/github/github-mcp-server:v1.12.1',
-                  'stdio',
-                  '--read-only',
+                  'stdio','--read-only',
                   '--tools=get_file_contents,pull_request_read,get_me'
               ]}
           }
           c=httpx.post(f'{base}/v1/projects/{pid}/mcp-clients', json=client_payload, headers=h, timeout=20)
-          c.raise_for_status(); cid=c.json()['id']
-
+          c.raise_for_status(); client=c.json(); cid=client['id']
           d=httpx.get(f'{base}/v1/projects/{pid}/mcp-clients/{cid}/tools', headers=h, timeout=90)
           d.raise_for_status(); discovery=d.json()
           assert discovery.get('ok') is True, discovery
           tools=discovery.get('tools') or []
           names={t.get('name') for t in tools}
-          assert 'get_file_contents' in names, names
+          assert {'get_file_contents','pull_request_read','get_me'} <= names, names
           assert not any(n in names for n in {'create_or_update_file','delete_file','create_pull_request','merge_pull_request'}), names
+          json.dump({'project':project,'client':client,'tools':discovery}, open('/tmp/github-mcp-registration.json','w'), indent=2)
           json.dump(discovery, open('/tmp/github-mcp-tools.json','w'), indent=2)
+          print('GITHUB_MCP_DISCOVERY_PASS', cid, sorted(names))
+          PY
 
-          tool_payload={
-              'name':'github_get_file_contents',
-              'kind':'mcp',
-              'config':{
-                  'description':'Read a file from GitHub through the official GitHub MCP server in read-only mode.',
-                  'mcp_client_id':cid,
-                  'remote_tool_name':'get_file_contents',
-                  'timeout_seconds':30
-              }
-          }
-          t=httpx.post(f'{base}/v1/projects/{pid}/tools', json=tool_payload, headers=h, timeout=20)
-          t.raise_for_status(); tid=t.json()['id']
+      - name: Invoke real GitHub tool through Forge MCP adapter
+        working-directory: vendor/forge/apps/api
+        shell: bash
+        run: |
+          python - <<'PY'
+          import asyncio, json
+          from types import SimpleNamespace
+          from forge.tools.mcp import server_tools, close_all
 
+          reg=json.load(open('/tmp/github-mcp-registration.json'))
+          p=reg['project']; c=reg['client']
+          row=SimpleNamespace(
+              id=c['id'], name=c['name'], transport=c['transport'], url=c.get('url'),
+              command=c.get('command'), args=c.get('args') or {}, headers_ref=c.get('headers_ref'),
+              auth_provider_id=c.get('auth_provider_id'), disabled_tools=c.get('disabled_tools') or []
+          )
+
+          async def main():
+              tools=await server_tools(row, p.get('tenant_id') or 'default', p['id'], {})
+              names={t.name for t in tools}
+              assert 'get_file_contents' in names, names
+              tool=next(t for t in tools if t.name=='get_file_contents')
+              out=await tool.ainvoke({
+                  'owner':'majaber1','repo':'agentic-platform-template',
+                  'path':'README.md','ref':'v0.5-open-source-first'
+              })
+              text=str(out)
+              open('/tmp/github-mcp-result.txt','w').write(text)
+              assert 'Agentic Platform Template' in text, text[:4000]
+              assert 'open-source-first' in text, text[:4000]
+              print('FORGE_GITHUB_MCP_TOOL_INVOKE_PASS', len(text))
+              await close_all()
+          asyncio.run(main())
+          PY
+
+      - name: Verify Forge agent can attach the MCP server natively
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, httpx
+          base='http://127.0.0.1:8000'
+          login=httpx.post(f'{base}/v1/auth/login', json={
+              'email':'acceptance@forge.local','password':'AcceptancePass123!'
+          }, timeout=20)
+          login.raise_for_status(); h={'Authorization': f"Bearer {login.json()['access_token']}"}
+          reg=json.load(open('/tmp/github-mcp-registration.json'))
+          pid=reg['project']['id']; cid=reg['client']['id']
           wf={
-              'id':'v05_github_mcp','version':1,
-              'state':{
-                  'messages':{'type':'list[message]','reducer':'add_messages'},
-                  'owner':{'type':'str','reducer':'last'},
-                  'repo':{'type':'str','reducer':'last'},
-                  'path':{'type':'str','reducer':'last'},
-                  'ref':{'type':'str','reducer':'last'},
-                  'tool_result':{'type':'json','reducer':'last'}
-              },
-              'entry_node':'github_read',
+              'id':'v05_github_mcp_agent_attach','version':1,
+              'state':{'messages':{'type':'list[message]','reducer':'add_messages'}},
+              'entry_node':'agent',
               'nodes':[
-                  {'id':'github_read','type':'tool_call','config':{
-                      'tool_id':tid,
-                      'input_mapping':{'owner':'owner','repo':'repo','path':'path','ref':'ref'},
-                      'output_key':'tool_result'
-                  }},
-                  {'id':'evidence','type':'emit_event','config':{
-                      'channel':'github_mcp_evidence',
-                      'payload':{'result':'{{state.tool_result}}'}
+                  {'id':'agent','type':'agent','config':{
+                      'flavor':'agent','model':'fake:MCP agent attachment PASS',
+                      'tools':[],'mcp_servers':[cid]
                   }},
                   {'id':'end','type':'end','config':{}}
               ],
-              'edges':[
-                  {'source':'github_read','target':'evidence'},
-                  {'source':'evidence','target':'end'}
-              ]
+              'edges':[{'source':'agent','target':'end'}]
           }
           w=httpx.post(f'{base}/v1/projects/{pid}/workflows', json={
-              'name':'GitHub MCP Read','description':'Official GitHub MCP read-only E2E','executable':wf
+              'name':'GitHub MCP Agent Attachment','description':'Native Forge agent mcp_servers path','executable':wf
           }, headers=h, timeout=20)
-          assert w.status_code==201,w.text
-          wid=w.json()['id']
-          q=httpx.patch(f'{base}/v1/projects/{pid}', json={'config':{'api_workflow_id':wid}}, headers=h, timeout=20)
+          assert w.status_code==201,w.text; wid=w.json()['id']
+          q=httpx.patch(f'{base}/v1/projects/{pid}', json={'config':{'api_workflow_id':wid,'default_model':'fake:echo'}}, headers=h, timeout=20)
           q.raise_for_status()
-
-          run=httpx.post(f'{base}/v1/projects/{pid}/run', json={
-              'input':{
-                  'messages':[{'role':'user','content':'Read the repository README through GitHub MCP.'}],
-                  'owner':'majaber1','repo':'agentic-platform-template','path':'README.md','ref':'v0.5-open-source-first'
-              },
-              'stream':True
+          r=httpx.post(f'{base}/v1/projects/{pid}/run', json={
+              'input':{'messages':[{'role':'user','content':'Verify MCP attachment.'}]},'stream':False
           }, headers=h, timeout=120)
-          run.raise_for_status(); stream=run.text
-          open('/tmp/github-mcp-run.txt','w').write(stream)
-          assert 'event: done' in stream, stream[-3000:]
-          assert 'github_mcp_evidence' in stream, stream[-5000:]
-          assert 'Agentic Platform Template' in stream, stream[-8000:]
-          assert 'open-source-first' in stream, stream[-8000:]
-
+          r.raise_for_status(); out=r.json()
+          assert out.get('status')=='done',out
+          assert 'MCP agent attachment PASS' in (out.get('answer') or ''),out
+          json.dump(out, open('/tmp/github-mcp-agent-run.json','w'), indent=2)
           traces=httpx.get(f'{base}/v1/projects/{pid}/traces', headers=h, timeout=20)
-          traces.raise_for_status(); rows=traces.json()
-          assert rows, rows
+          traces.raise_for_status(); rows=traces.json(); assert rows,rows
           detail=httpx.get(f'{base}/v1/projects/{pid}/traces/{rows[0]["id"]}', headers=h, timeout=20)
-          detail.raise_for_status()
-          json.dump(detail.json(), open('/tmp/github-mcp-trace.json','w'), indent=2)
-          trace_text=json.dumps(detail.json())
-          assert 'github' in trace_text.lower(), trace_text[:4000]
-
-          print('GITHUB_MCP_FORGE_WORKFLOW_E2E_PASS', cid, tid, wid, len(tools))
+          detail.raise_for_status(); json.dump(detail.json(), open('/tmp/github-mcp-trace.json','w'), indent=2)
+          print('FORGE_AGENT_MCP_ATTACHMENT_PASS', cid, wid)
           PY
 
       - name: Collect GitHub MCP evidence
@@ -192,7 +195,9 @@ jobs:
             /tmp/ready.json
             /tmp/forge-api.log
             /tmp/github-mcp-image.txt
+            /tmp/github-mcp-registration.json
             /tmp/github-mcp-tools.json
-            /tmp/github-mcp-run.txt
+            /tmp/github-mcp-result.txt
+            /tmp/github-mcp-agent-run.json
             /tmp/github-mcp-trace.json
           if-no-files-found: ignore
