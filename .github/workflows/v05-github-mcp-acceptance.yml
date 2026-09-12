@@ -55,6 +55,14 @@ jobs:
           docker pull "$GITHUB_MCP_IMAGE"
           docker inspect "$GITHUB_MCP_IMAGE" --format '{{index .RepoDigests 0}}' | tee /tmp/github-mcp-image.txt
 
+      - name: Create protected GitHub MCP auth env file
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf 'GITHUB_PERSONAL_ACCESS_TOKEN=%s\n' "$GITHUB_PERSONAL_ACCESS_TOKEN" > /tmp/github-mcp.env
+          test "$(stat -c '%a' /tmp/github-mcp.env)" = "600"
+
       - name: Start Forge API with bounded MCP stdio
         working-directory: vendor/forge/apps/api
         shell: bash
@@ -86,7 +94,7 @@ jobs:
               'command':'docker',
               'args':{'args':[
                   'run','-i','--rm',
-                  '-e','GITHUB_PERSONAL_ACCESS_TOKEN',
+                  '--env-file','/tmp/github-mcp.env',
                   'ghcr.io/github/github-mcp-server:v1.12.1',
                   'stdio','--read-only',
                   '--tools=get_file_contents,pull_request_read,get_me'
@@ -201,3 +209,7 @@ jobs:
             /tmp/github-mcp-agent-run.json
             /tmp/github-mcp-trace.json
           if-no-files-found: ignore
+
+      - name: Remove GitHub MCP auth env file
+        if: always()
+        run: rm -f /tmp/github-mcp.env
