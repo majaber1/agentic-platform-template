@@ -51,7 +51,9 @@ jobs:
         run: python -m pip install -U pip && pip install -e ".[dev,all]"
 
       - name: Pull official GitHub MCP image
-        run: docker pull "$GITHUB_MCP_IMAGE"
+        run: |
+          docker pull "$GITHUB_MCP_IMAGE"
+          docker inspect "$GITHUB_MCP_IMAGE" --format '{{index .RepoDigests 0}}' | tee /tmp/github-mcp-image.txt
 
       - name: Start Forge API with bounded MCP stdio
         working-directory: vendor/forge/apps/api
@@ -65,7 +67,7 @@ jobs:
           cat /tmp/forge-api.log
           exit 1
 
-      - name: Register and exercise official GitHub MCP through Forge
+      - name: Register and execute official GitHub MCP through Forge workflow
         shell: bash
         run: |
           python - <<'PY'
@@ -119,14 +121,66 @@ jobs:
           t=httpx.post(f'{base}/v1/projects/{pid}/tools', json=tool_payload, headers=h, timeout=20)
           t.raise_for_status(); tid=t.json()['id']
 
-          args={'owner':'majaber1','repo':'agentic-platform-template','path':'README.md','ref':'v0.5-open-source-first'}
-          r=httpx.post(f'{base}/v1/projects/{pid}/tools/{tid}/test', json={'args':args,'context':{}}, headers=h, timeout=90)
-          r.raise_for_status(); result=r.json()
-          json.dump(result, open('/tmp/github-mcp-result.json','w'), indent=2)
-          text=json.dumps(result)
-          assert 'Agentic Platform Template' in text, text[:2000]
-          assert 'open-source-first' in text, text[:2000]
-          print('GITHUB_MCP_FORGE_E2E_PASS', cid, tid, len(tools))
+          wf={
+              'id':'v05_github_mcp','version':1,
+              'state':{
+                  'messages':{'type':'list[message]','reducer':'add_messages'},
+                  'owner':{'type':'str','reducer':'last'},
+                  'repo':{'type':'str','reducer':'last'},
+                  'path':{'type':'str','reducer':'last'},
+                  'ref':{'type':'str','reducer':'last'},
+                  'tool_result':{'type':'json','reducer':'last'}
+              },
+              'entry_node':'github_read',
+              'nodes':[
+                  {'id':'github_read','type':'tool_call','config':{
+                      'tool_id':tid,
+                      'input_mapping':{'owner':'owner','repo':'repo','path':'path','ref':'ref'},
+                      'output_key':'tool_result'
+                  }},
+                  {'id':'evidence','type':'emit_event','config':{
+                      'channel':'github_mcp_evidence',
+                      'payload':{'result':'{{state.tool_result}}'}
+                  }},
+                  {'id':'end','type':'end','config':{}}
+              ],
+              'edges':[
+                  {'source':'github_read','target':'evidence'},
+                  {'source':'evidence','target':'end'}
+              ]
+          }
+          w=httpx.post(f'{base}/v1/projects/{pid}/workflows', json={
+              'name':'GitHub MCP Read','description':'Official GitHub MCP read-only E2E','executable':wf
+          }, headers=h, timeout=20)
+          assert w.status_code==201,w.text
+          wid=w.json()['id']
+          q=httpx.patch(f'{base}/v1/projects/{pid}', json={'config':{'api_workflow_id':wid}}, headers=h, timeout=20)
+          q.raise_for_status()
+
+          run=httpx.post(f'{base}/v1/projects/{pid}/run', json={
+              'input':{
+                  'messages':[{'role':'user','content':'Read the repository README through GitHub MCP.'}],
+                  'owner':'majaber1','repo':'agentic-platform-template','path':'README.md','ref':'v0.5-open-source-first'
+              },
+              'stream':True
+          }, headers=h, timeout=120)
+          run.raise_for_status(); stream=run.text
+          open('/tmp/github-mcp-run.txt','w').write(stream)
+          assert 'event: done' in stream, stream[-3000:]
+          assert 'github_mcp_evidence' in stream, stream[-5000:]
+          assert 'Agentic Platform Template' in stream, stream[-8000:]
+          assert 'open-source-first' in stream, stream[-8000:]
+
+          traces=httpx.get(f'{base}/v1/projects/{pid}/traces', headers=h, timeout=20)
+          traces.raise_for_status(); rows=traces.json()
+          assert rows, rows
+          detail=httpx.get(f'{base}/v1/projects/{pid}/traces/{rows[0]["id"]}', headers=h, timeout=20)
+          detail.raise_for_status()
+          json.dump(detail.json(), open('/tmp/github-mcp-trace.json','w'), indent=2)
+          trace_text=json.dumps(detail.json())
+          assert 'github' in trace_text.lower(), trace_text[:4000]
+
+          print('GITHUB_MCP_FORGE_WORKFLOW_E2E_PASS', cid, tid, wid, len(tools))
           PY
 
       - name: Collect GitHub MCP evidence
@@ -137,6 +191,8 @@ jobs:
           path: |
             /tmp/ready.json
             /tmp/forge-api.log
+            /tmp/github-mcp-image.txt
             /tmp/github-mcp-tools.json
-            /tmp/github-mcp-result.json
+            /tmp/github-mcp-run.txt
+            /tmp/github-mcp-trace.json
           if-no-files-found: ignore
