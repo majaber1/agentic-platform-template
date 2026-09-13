@@ -43,6 +43,24 @@ foreach ($component in $Lock.components) {
   Write-Host "[v0.5] $($component.name) pinned at $actual"
 }
 
+$ForgeDir = Join-Path $Root "vendor/forge"
+$ForgePatch = Join-Path $Root "patches/forge/0001-playground-hitl-run-reattach.patch"
+if ((Test-Path (Join-Path $ForgeDir ".git")) -and (Test-Path $ForgePatch)) {
+  git -C $ForgeDir apply --reverse --check $ForgePatch 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "[v0.5] Forge governed patch already applied"
+  }
+  else {
+    git -C $ForgeDir apply --check $ForgePatch
+    if ($LASTEXITCODE -ne 0) { throw "Forge governed patch does not apply cleanly to the pinned upstream" }
+    git -C $ForgeDir apply $ForgePatch
+    if ($LASTEXITCODE -ne 0) { throw "Failed to apply Forge governed patch" }
+    git -C $ForgeDir diff --check
+    if ($LASTEXITCODE -ne 0) { throw "Forge governed patch introduced whitespace errors" }
+    Write-Host "[v0.5] Applied Forge HITL refresh reattach patch"
+  }
+}
+
 Write-Host ""
 Write-Host "v0.5 upstream bootstrap PASS"
 Write-Host "Next: ./scripts/run-v05.ps1"
