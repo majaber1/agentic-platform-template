@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Apply the governed v0.5 Forge customizations to the pinned upstream checkout.
+"""Apply governed v0.5 customizations to the pinned Forge checkout.
 
-This script is intentionally strict: it only edits the exact playground.tsx blob
-that was accepted for Forge commit 048fdc6. If upstream changes, the script fails
-rather than guessing how to patch a different source version.
+Strict by design: only the exact accepted upstream playground.tsx blob may be
+modified. If upstream changes, fail instead of guessing how to patch it.
 """
 from __future__ import annotations
 
@@ -48,62 +47,67 @@ def main() -> None:
         "persisted-run type",
     )
 
+    helpers = '''  const abortRef = useRef<AbortController | null>(null);
+
+  // Persist only opaque run handles. Interrupt prompts/tool args stay server-authoritative
+  // and are recovered by replaying the run SSE after a browser refresh.
+  const pendingRunKey = project?.id ? `forge:playground:pending-run:${project.id}` : "";
+
+  function readPersistedRun(): PersistedRunRef | null {
+    if (!pendingRunKey || typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem(pendingRunKey);
+      if (!raw) return null;
+      const value = JSON.parse(raw);
+      if (!value?.workflowId || !value?.runId) return null;
+      return { workflowId: String(value.workflowId), runId: String(value.runId), threadId: value.threadId ? String(value.threadId) : null };
+    } catch {
+      window.localStorage.removeItem(pendingRunKey);
+      return null;
+    }
+  }
+
+  function persistRun(ref: PersistedRunRef) {
+    if (!pendingRunKey || typeof window === "undefined") return;
+    window.localStorage.setItem(pendingRunKey, JSON.stringify(ref));
+  }
+
+  function clearPersistedRun() {
+    if (!pendingRunKey || typeof window === "undefined") return;
+    window.localStorage.removeItem(pendingRunKey);
+  }
+
+  async function reattachPersistedRun(targetWf: Workflow, ref: PersistedRunRef) {
+    setRunning(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let interrupted = false;
+    try {
+      await openSSE(api.runStreamUrl(project.id, targetWf.id, ref.runId), (f) => {
+        if (f.event === "interrupt") {
+          interrupted = true;
+          setPendingInterrupt({ runId: ref.runId, payload: f.data });
+        } else if (f.event === "done" || f.event === "error") {
+          clearPersistedRun();
+        }
+      }, { signal: controller.signal });
+      if (!interrupted) clearPersistedRun();
+    } catch (e: any) {
+      if (e?.name !== "AbortError") clearPersistedRun();
+    } finally {
+      abortRef.current = null;
+      setRunning(false);
+    }
+  }
+
+  useEffect(() => {
+'''
     text = replace_once(
         text,
         '  const abortRef = useRef<AbortController | null>(null);\n\n  useEffect(() => {\n',
-        '''  const abortRef = useRef<AbortController | null>(null);\n\n'
-        '  // Persist only opaque run handles. Interrupt prompts/tool args stay server-authoritative\n'
-        '  // and are recovered by replaying the run SSE after a browser refresh.\n'
-        '  const pendingRunKey = project?.id ? `forge:playground:pending-run:${project.id}` : "";\n\n'
-        '  function readPersistedRun(): PersistedRunRef | null {\n'
-        '    if (!pendingRunKey || typeof window === "undefined") return null;\n'
-        '    try {\n'
-        '      const raw = window.localStorage.getItem(pendingRunKey);\n'
-        '      if (!raw) return null;\n'
-        '      const value = JSON.parse(raw);\n'
-        '      if (!value?.workflowId || !value?.runId) return null;\n'
-        '      return { workflowId: String(value.workflowId), runId: String(value.runId), threadId: value.threadId ? String(value.threadId) : null };\n'
-        '    } catch {\n'
-        '      window.localStorage.removeItem(pendingRunKey);\n'
-        '      return null;\n'
-        '    }\n'
-        '  }\n\n'
-        '  function persistRun(ref: PersistedRunRef) {\n'
-        '    if (!pendingRunKey || typeof window === "undefined") return;\n'
-        '    window.localStorage.setItem(pendingRunKey, JSON.stringify(ref));\n'
-        '  }\n\n'
-        '  function clearPersistedRun() {\n'
-        '    if (!pendingRunKey || typeof window === "undefined") return;\n'
-        '    window.localStorage.removeItem(pendingRunKey);\n'
-        '  }\n\n'
-        '  async function reattachPersistedRun(targetWf: Workflow, ref: PersistedRunRef) {\n'
-        '    setRunning(true);\n'
-        '    const controller = new AbortController();\n'
-        '    abortRef.current = controller;\n'
-        '    let interrupted = false;\n'
-        '    try {\n'
-        '      await openSSE(api.runStreamUrl(project.id, targetWf.id, ref.runId), (f) => {\n'
-        '        if (f.event === "interrupt") {\n'
-        '          interrupted = true;\n'
-        '          setPendingInterrupt({ runId: ref.runId, payload: f.data });\n'
-        '        } else if (f.event === "done" || f.event === "error") {\n'
-        '          clearPersistedRun();\n'
-        '        }\n'
-        '      }, { signal: controller.signal });\n'
-        '      if (!interrupted) clearPersistedRun();\n'
-        '    } catch (e: any) {\n'
-        '      if (e?.name !== "AbortError") clearPersistedRun();\n'
-        '    } finally {\n'
-        '      abortRef.current = null;\n'
-        '      setRunning(false);\n'
-        '    }\n'
-        '  }\n\n'
-        '  useEffect(() => {\n''',
+        helpers,
         "run reattach helpers",
     )
-
-    # Remove the quote separators used above to keep this Python source readable.
-    text = text.replace(";\\n'\n        '", ";\\n") if False else text
 
     text = replace_once(
         text,
@@ -150,7 +154,7 @@ def main() -> None:
         '      if (e?.name !== "AbortError") finalAnswer = `⚠ ${e.message || e}`;\n',
         '      if (e?.name !== "AbortError") finalAnswer = `⚠ ${e.message || e}`;\n'
         '      clearPersistedRun();\n',
-        "clear failed/aborted run",
+        "clear failed or aborted run",
     )
     text = replace_once(
         text,
