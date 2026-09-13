@@ -41,15 +41,27 @@ jobs:
           test "$(git -C vendor/forge rev-parse HEAD)" = "$FORGE_SHA"
           grep -q "MIT License" vendor/forge/LICENSE
 
-      - name: Generate ephemeral acceptance credentials
+      - name: Apply governed Forge customizations
         shell: bash
         run: |
-          python - <<'PY' >> "$GITHUB_ENV"
-          import secrets
-          print('HITL_TEST_PASSWORD=Aa1!'+secrets.token_urlsafe(24))
-          print('FORGE_BOOTSTRAP_ADMIN_PASSWORD=Aa1!'+secrets.token_urlsafe(24))
-          print('FORGE_JWT_SECRET='+secrets.token_urlsafe(48))
-          PY
+          set -euo pipefail
+          PATCH="$GITHUB_WORKSPACE/patches/forge/0001-playground-hitl-run-reattach.patch"
+          git -C vendor/forge apply --check "$PATCH"
+          git -C vendor/forge apply "$PATCH"
+          git -C vendor/forge diff --check
+          grep -q 'forge:playground:pending-run:' vendor/forge/apps/web/components/screens/playground.tsx
+
+      - name: Generate masked ephemeral acceptance credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          PASSWORD="Aa1!$(python -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          JWT_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          echo "::add-mask::$PASSWORD"
+          echo "::add-mask::$JWT_SECRET"
+          echo "HITL_TEST_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+          echo "FORGE_BOOTSTRAP_ADMIN_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+          echo "FORGE_JWT_SECRET=$JWT_SECRET" >> "$GITHUB_ENV"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -77,11 +89,6 @@ jobs:
           python -m pip install -U pip
           pip install -e "vendor/forge/apps/api[dev,all]"
           pnpm -C vendor/forge install --frozen-lockfile
-
-      - name: Align generated login password
-        shell: bash
-        run: |
-          echo "FORGE_BOOTSTRAP_ADMIN_PASSWORD=$HITL_TEST_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Start Forge API
         working-directory: vendor/forge/apps/api
@@ -159,11 +166,11 @@ jobs:
               page.screenshot(path='/tmp/hitl-browser-rejected.png',full_page=True)
               page.get_by_role('button',name='Reset',exact=True).click(); inp=page.get_by_placeholder('Message the workflow…'); inp.fill('browser refresh persistence path'); inp.press('Enter'); page.get_by_text('Approval required',exact=True).wait_for(timeout=20000)
               page.screenshot(path='/tmp/hitl-browser-before-refresh.png',full_page=True); page.reload(wait_until='networkidle')
-              restored=True
-              try: page.get_by_text('Approval required',exact=True).wait_for(timeout=7000)
-              except Exception: restored=False
-              page.screenshot(path='/tmp/hitl-browser-after-refresh.png',full_page=True); json.dump({'pending_approval_restored_after_refresh':restored},open('/tmp/hitl-browser-refresh.json','w'))
-              if not restored: raise AssertionError('Pending HITL approval is not restored after Playground refresh')
+              page.get_by_text('Approval required',exact=True).wait_for(timeout=15000)
+              page.get_by_text('Approve v0.5 controlled action?',exact=True).wait_for(timeout=5000)
+              page.screenshot(path='/tmp/hitl-browser-after-refresh.png',full_page=True)
+              json.dump({'pending_approval_restored_after_refresh':True},open('/tmp/hitl-browser-refresh.json','w'))
+              page.get_by_role('button',name='approve',exact=True).click(); page.get_by_text('Approval required',exact=True).wait_for(state='detached',timeout=15000)
               print('HITL_BROWSER_E2E_PASS'); b.close()
           PY
           python /tmp/hitl_browser_e2e.py | tee /tmp/hitl-browser-result.txt
