@@ -1,0 +1,131 @@
+diff --git a/apps/web/components/screens/playground.tsx b/apps/web/components/screens/playground.tsx
+--- a/apps/web/components/screens/playground.tsx
++++ b/apps/web/components/screens/playground.tsx
+@@ -13,6 +13,7 @@ import Mustache from "mustache";
+ interface ChatMsg { role: "user" | "assistant"; content?: string; parts?: Part[] }
+ interface Step { node: string }
+ interface Activity { id: string; kind: string; name: string; done: boolean; error?: boolean }
++interface PersistedRunRef { workflowId: string; runId: string; threadId: string | null }
+ 
+ export function PlaygroundScreen({ project }: { project: any }) {
+@@ -39,15 +40,69 @@ export function PlaygroundScreen({ project }: { project: any }) {
+   // Aborts the in-flight SSE stream when the user hits Stop.
+   const abortRef = useRef<AbortController | null>(null);
+ 
++  // Keep only opaque run handles in browser storage. The interrupt payload (prompt/tool args)
++  // remains server-authoritative and is recovered by replaying the persisted run's SSE frames.
++  const pendingRunKey = project?.id ? `forge:playground:pending-run:${project.id}` : "";
++
++  function readPersistedRun(): PersistedRunRef | null {
++    if (!pendingRunKey || typeof window === "undefined") return null;
++    try {
++      const raw = window.localStorage.getItem(pendingRunKey);
++      if (!raw) return null;
++      const value = JSON.parse(raw);
++      if (!value?.workflowId || !value?.runId) return null;
++      return { workflowId: String(value.workflowId), runId: String(value.runId), threadId: value.threadId ? String(value.threadId) : null };
++    } catch {
++      window.localStorage.removeItem(pendingRunKey);
++      return null;
++    }
++  }
++
++  function persistRun(ref: PersistedRunRef) {
++    if (!pendingRunKey || typeof window === "undefined") return;
++    window.localStorage.setItem(pendingRunKey, JSON.stringify(ref));
++  }
++
++  function clearPersistedRun() {
++    if (!pendingRunKey || typeof window === "undefined") return;
++    window.localStorage.removeItem(pendingRunKey);
++  }
++
++  async function reattachPersistedRun(targetWf: Workflow, ref: PersistedRunRef) {
++    setRunning(true);
++    const controller = new AbortController();
++    abortRef.current = controller;
++    let interrupted = false;
++    try {
++      await openSSE(api.runStreamUrl(project.id, targetWf.id, ref.runId), (f) => {
++        if (f.event === "interrupt") {
++          interrupted = true;
++          setPendingInterrupt({ runId: ref.runId, payload: f.data });
++        } else if (f.event === "done" || f.event === "error") {
++          clearPersistedRun();
++        }
++      }, { signal: controller.signal });
++      // A replay that contains no interrupt is terminal/stale and must not survive another reload.
++      if (!interrupted) clearPersistedRun();
++    } catch (e: any) {
++      if (e?.name !== "AbortError") clearPersistedRun();
++    } finally {
++      abortRef.current = null;
++      setRunning(false);
++    }
++  }
++
+   useEffect(() => {
+     if (!project?.id) return;
+     threadRef.current = null;
+-    setWf(null); setLoadErr(null); setMsgs([]); setSteps([]); setMeter(null);
++    setWf(null); setLoadErr(null); setMsgs([]); setSteps([]); setMeter(null); setPendingInterrupt(null);
+     api.listComponents(project.id).then((cs) => setCompDefs(Object.fromEntries(cs.map((c) => [c.id, c])))).catch(() => {});
+     api.listWorkflows(project.id)
+       .then((ws) => {
+         setWfs(ws);
+-        const active = ws.find((w) => w.status === "active") || ws[0] || null;
++        const persisted = readPersistedRun();
++        const persistedWf = persisted ? ws.find((w) => w.id === persisted.workflowId) || null : null;
++        const active = persistedWf || ws.find((w) => w.status === "active") || ws[0] || null;
+         setWf(active);
++        if (persisted && persistedWf) {
++          threadRef.current = persisted.threadId;
++          void reattachPersistedRun(persistedWf, persisted);
++        } else if (persisted) {
++          clearPersistedRun();
++        }
+         if (!active) setLoadErr("No workflows in this project yet. Create one in Workflows, or ask the Forge Assistant to build one.");
+       })
+@@ -80,6 +135,7 @@ export function PlaygroundScreen({ project }: { project: any }) {
+         threadRef.current || undefined,
+       );
+       threadRef.current = run.thread_id;
++      persistRun({ workflowId: wf.id, runId: run.id, threadId: run.thread_id || null });
+       let interrupted = false;
+       const url = api.runStreamUrl(project.id, wf.id, run.id);
+@@ -111,6 +167,7 @@ export function PlaygroundScreen({ project }: { project: any }) {
+         } else if (f.event === "error") {
+           finalAnswer = `⚠ ${f.data?.message || "run failed"}`;
+         }
+       }, { signal: controller.signal });
++      if (!interrupted) clearPersistedRun();
+       if (interrupted) {
+         // Preserve anything streamed before the pause (audit M4) - mirror the finalize commit.
+@@ -126,6 +183,7 @@ export function PlaygroundScreen({ project }: { project: any }) {
+     } catch (e: any) {
+       // A user-initiated Stop aborts the fetch - commit whatever streamed, no error banner.
+       if (e?.name !== "AbortError") finalAnswer = `⚠ ${e.message || e}`;
++      clearPersistedRun();
+     } finally {
+       abortRef.current = null;
+@@ -174,6 +232,7 @@ export function PlaygroundScreen({ project }: { project: any }) {
+       const last = [...msgsOut].reverse().find((m: any) => (m.type === "ai" || m.role === "assistant") && m.content);
+       const content = last ? (typeof last.content === "string" ? last.content : JSON.stringify(last.content)) : (res.error || "(resumed)");
+       setMsgs((m) => [...m, { role: "assistant", content: res.interrupted ? content + "\n⏸ paused again for another approval - check Traces." : content }]);
++      if (!res.interrupted) clearPersistedRun();
+     } catch (e: any) {
+       setMsgs((m) => [...m, { role: "assistant", content: `⚠ resume failed: ${e.message || e}` }]);
+@@ -195,6 +254,7 @@ export function PlaygroundScreen({ project }: { project: any }) {
+   // server-side history (nulling threadRef) - not just a visual clear.
+   function reset() {
+     threadRef.current = null;
++    clearPersistedRun();
+     setMsgs([]); setSteps([]); setMeter(null); setStreaming(""); setLiveParts([]); setPendingInterrupt(null);
+   }
+@@ -214,6 +274,7 @@ export function PlaygroundScreen({ project }: { project: any }) {
+   const switchWf = (id: string) => {
+     const next = wfs.find((w) => w.id === id) || null;
+     threadRef.current = null;
++    clearPersistedRun();
+     setWf(next); setMsgs([]); setSteps([]); setMeter(null); setStreaming("");
+   };
