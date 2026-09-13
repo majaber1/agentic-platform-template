@@ -10,6 +10,9 @@ $Lock = Get-Content $LockPath -Raw | ConvertFrom-Json
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
   throw "git is required but was not found in PATH."
 }
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+  throw "python is required but was not found in PATH."
+}
 
 foreach ($component in $Lock.components) {
   $target = Join-Path $Root ($component.target_path -replace '/', [IO.Path]::DirectorySeparatorChar)
@@ -27,7 +30,6 @@ foreach ($component in $Lock.components) {
     if ($LASTEXITCODE -ne 0) { throw "Fetch failed for $($component.name)" }
   }
 
-  # Always enforce the immutable pinned ref. Upstream main is never followed implicitly.
   git -C $target checkout --detach $component.ref
   if ($LASTEXITCODE -ne 0) {
     git -C $target fetch --all --tags --prune
@@ -39,26 +41,17 @@ foreach ($component in $Lock.components) {
   if ($actual -ne $component.ref) {
     throw "$($component.name) checkout mismatch. expected=$($component.ref) actual=$actual"
   }
-
   Write-Host "[v0.5] $($component.name) pinned at $actual"
 }
 
 $ForgeDir = Join-Path $Root "vendor/forge"
-$ForgePatch = Join-Path $Root "patches/forge/0001-playground-hitl-run-reattach.patch"
-if ((Test-Path (Join-Path $ForgeDir ".git")) -and (Test-Path $ForgePatch)) {
-  git -C $ForgeDir apply --reverse --check $ForgePatch 2>$null
-  if ($LASTEXITCODE -eq 0) {
-    Write-Host "[v0.5] Forge governed patch already applied"
-  }
-  else {
-    git -C $ForgeDir apply --check $ForgePatch
-    if ($LASTEXITCODE -ne 0) { throw "Forge governed patch does not apply cleanly to the pinned upstream" }
-    git -C $ForgeDir apply $ForgePatch
-    if ($LASTEXITCODE -ne 0) { throw "Failed to apply Forge governed patch" }
-    git -C $ForgeDir diff --check
-    if ($LASTEXITCODE -ne 0) { throw "Forge governed patch introduced whitespace errors" }
-    Write-Host "[v0.5] Applied Forge HITL refresh reattach patch"
-  }
+$Customizer = Join-Path $Root "scripts/apply-v05-forge-customizations.py"
+if (Test-Path (Join-Path $ForgeDir ".git")) {
+  python $Customizer $ForgeDir
+  if ($LASTEXITCODE -ne 0) { throw "Forge governed customization failed" }
+  git -C $ForgeDir diff --check
+  if ($LASTEXITCODE -ne 0) { throw "Forge governed customization introduced whitespace errors" }
+  Write-Host "[v0.5] Governed Forge customizations verified"
 }
 
 Write-Host ""
