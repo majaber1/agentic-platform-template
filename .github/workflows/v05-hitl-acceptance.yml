@@ -18,6 +18,7 @@ env:
   FORGE_PUBLIC_BASE_URL: http://127.0.0.1:8000
   FORGE_PUBLIC_CONSOLE_URL: http://127.0.0.1:3000
   NEXT_PUBLIC_FORGE_API_URL: ""
+  HITL_EVIDENCE_DIR: /tmp
 
 jobs:
   hitl-runtime:
@@ -34,20 +35,13 @@ jobs:
           ref: ${{ env.FORGE_SHA }}
           path: vendor/forge
 
-      - name: Verify Forge pin
+      - name: Verify pin and apply governed customizations
         shell: bash
         run: |
           set -euo pipefail
           test "$(git -C vendor/forge rev-parse HEAD)" = "$FORGE_SHA"
           grep -q "MIT License" vendor/forge/LICENSE
-
-      - name: Apply governed Forge customizations
-        shell: bash
-        run: |
-          set -euo pipefail
-          PATCH="$GITHUB_WORKSPACE/patches/forge/0001-playground-hitl-run-reattach.patch"
-          git -C vendor/forge apply --check "$PATCH"
-          git -C vendor/forge apply "$PATCH"
+          python scripts/apply-v05-forge-customizations.py vendor/forge
           git -C vendor/forge diff --check
           grep -q 'forge:playground:pending-run:' vendor/forge/apps/web/components/screens/playground.tsx
 
@@ -86,6 +80,7 @@ jobs:
       - name: Install Forge
         shell: bash
         run: |
+          set -euo pipefail
           python -m pip install -U pip
           pip install -e "vendor/forge/apps/api[dev,all]"
           pnpm -C vendor/forge install --frozen-lockfile
@@ -99,44 +94,24 @@ jobs:
             if curl -fsS http://127.0.0.1:8000/readyz >/tmp/hitl-ready.json; then exit 0; fi
             sleep 2
           done
-          cat /tmp/forge-hitl-api.log; exit 1
+          cat /tmp/forge-hitl-api.log
+          exit 1
 
-      - name: Real HTTP HITL gate
+      - name: Real HTTP HITL acceptance
         shell: bash
-        run: |
-          cat > /tmp/hitl_api_e2e.py <<'PY'
-          import json, os, httpx
-          BASE='http://127.0.0.1:8000'; EMAIL='hitl@forge.local'; PASSWORD=os.environ['HITL_TEST_PASSWORD']
-          def client():
-              c=httpx.Client(base_url=BASE,timeout=30)
-              r=c.post('/v1/auth/login',json={'email':EMAIL,'password':PASSWORD}); r.raise_for_status()
-              c.headers['Authorization']=f"Bearer {r.json()['access_token']}"; return c
-          c=client(); p=c.post('/v1/projects',json={'name':'v0.5 HITL Acceptance Project'}); assert p.status_code==201,p.text; pid=p.json()['id']
-          exe={'id':'v05_hitl','version':1,'state':{'messages':{'type':'list[message]','reducer':'add_messages'}},'entry_node':'approval','nodes':[{'id':'approval','type':'human_input','config':{'prompt':'Approve v0.5 controlled action?','allowed_decisions':['approve','reject']}},{'id':'end','type':'end','config':{}}],'edges':[{'source':'approval','target':'end'}]}
-          w=c.post(f'/v1/projects/{pid}/workflows',json={'name':'v0.5 HITL Gate','description':'Runtime approval acceptance','executable':exe}); assert w.status_code==201,w.text; wid=w.json()['id']
-          assert c.patch(f'/v1/projects/{pid}',json={'config':{'api_workflow_id':wid,'default_model':'fake:echo'}}).status_code==200
-          def start(label):
-              r=c.post(f'/v1/projects/{pid}/run',json={'input':{'messages':[{'role':'user','content':label}]},'stream':False}); assert r.status_code==200,r.text
-              o=r.json(); assert o.get('interrupted') is True and o.get('thread_id') and o.get('run_id'),o; return o
-          a=start('approve path'); json.dump(a,open('/tmp/hitl-approve-pending.json','w'),indent=2)
-          c.close(); c=client(); r=c.post(f'/v1/projects/{pid}/run',json={'thread_id':a['thread_id'],'resume':{'value':'approve'},'stream':False}); assert r.status_code==200,r.text
-          approved=r.json(); assert approved.get('interrupted') is not True and approved.get('thread_id')==a['thread_id']; json.dump(approved,open('/tmp/hitl-approved.json','w'),indent=2)
-          dup=c.post(f'/v1/projects/{pid}/run',json={'thread_id':a['thread_id'],'resume':{'value':'approve'},'stream':False}); assert dup.status_code==409,(dup.status_code,dup.text); json.dump({'status':dup.status_code,'body':dup.json()},open('/tmp/hitl-duplicate.json','w'),indent=2)
-          rj=start('reject path'); json.dump(rj,open('/tmp/hitl-reject-pending.json','w'),indent=2)
-          r=c.post(f'/v1/projects/{pid}/run',json={'thread_id':rj['thread_id'],'resume':{'value':'reject'},'stream':False}); assert r.status_code==200,r.text; json.dump(r.json(),open('/tmp/hitl-rejected.json','w'),indent=2)
-          assert c.get(f'/v1/projects/{pid}').status_code==200 and c.get(f'/v1/projects/{pid}/workflows/{wid}').status_code==200
-          json.dump({'project_id':pid,'workflow_id':wid},open('/tmp/hitl-ids.json','w'),indent=2)
-          print('HITL_HTTP_E2E_PASS',pid,wid,a['run_id'],rj['run_id'])
-          PY
-          python /tmp/hitl_api_e2e.py | tee /tmp/hitl-api-result.txt
+        run: python tests/acceptance/v05_hitl_api.py | tee /tmp/hitl-api-result.txt
 
       - name: Start Forge web
         working-directory: vendor/forge
         shell: bash
         run: |
           nohup pnpm --filter web dev > /tmp/forge-hitl-web.log 2>&1 &
-          for i in {1..60}; do curl -fsS http://127.0.0.1:3000 >/dev/null && exit 0 || sleep 2; done
-          cat /tmp/forge-hitl-web.log; exit 1
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3000 >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/forge-hitl-web.log
+          exit 1
 
       - name: Install Playwright Chromium
         shell: bash
@@ -144,38 +119,11 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Browser HITL gate
+      - name: Browser HITL acceptance
         shell: bash
-        run: |
-          cat > /tmp/hitl_browser_e2e.py <<'PY'
-          import json, os
-          from playwright.sync_api import sync_playwright
-          with sync_playwright() as p:
-              b=p.chromium.launch(); page=b.new_page(viewport={'width':1440,'height':1000})
-              page.goto('http://127.0.0.1:3000',wait_until='networkidle')
-              page.get_by_text('Sign in to your workspace').wait_for(timeout=15000)
-              page.get_by_placeholder('you@company.com').fill('hitl@forge.local'); page.locator('input[type="password"]').fill(os.environ['HITL_TEST_PASSWORD'])
-              page.get_by_role('button',name='Sign in').click(); page.get_by_text('Welcome to Forge').wait_for(timeout=20000)
-              page.get_by_text('v0.5 HITL Acceptance Project',exact=True).first.click()
-              page.get_by_role('button',name='Playground',exact=True).first.click()
-              inp=page.get_by_placeholder('Message the workflow…'); inp.wait_for(timeout=15000)
-              inp.fill('browser approve path'); inp.press('Enter'); page.get_by_text('Approval required',exact=True).wait_for(timeout=20000)
-              page.screenshot(path='/tmp/hitl-browser-pending-approve.png',full_page=True); page.get_by_role('button',name='approve',exact=True).click(); page.get_by_text('Approval required',exact=True).wait_for(state='detached',timeout=15000)
-              page.screenshot(path='/tmp/hitl-browser-approved.png',full_page=True)
-              page.get_by_role('button',name='Reset',exact=True).click(); inp=page.get_by_placeholder('Message the workflow…'); inp.fill('browser reject path'); inp.press('Enter'); page.get_by_text('Approval required',exact=True).wait_for(timeout=20000); page.get_by_role('button',name='reject',exact=True).click(); page.get_by_text('Approval required',exact=True).wait_for(state='detached',timeout=15000)
-              page.screenshot(path='/tmp/hitl-browser-rejected.png',full_page=True)
-              page.get_by_role('button',name='Reset',exact=True).click(); inp=page.get_by_placeholder('Message the workflow…'); inp.fill('browser refresh persistence path'); inp.press('Enter'); page.get_by_text('Approval required',exact=True).wait_for(timeout=20000)
-              page.screenshot(path='/tmp/hitl-browser-before-refresh.png',full_page=True); page.reload(wait_until='networkidle')
-              page.get_by_text('Approval required',exact=True).wait_for(timeout=15000)
-              page.get_by_text('Approve v0.5 controlled action?',exact=True).wait_for(timeout=5000)
-              page.screenshot(path='/tmp/hitl-browser-after-refresh.png',full_page=True)
-              json.dump({'pending_approval_restored_after_refresh':True},open('/tmp/hitl-browser-refresh.json','w'))
-              page.get_by_role('button',name='approve',exact=True).click(); page.get_by_text('Approval required',exact=True).wait_for(state='detached',timeout=15000)
-              print('HITL_BROWSER_E2E_PASS'); b.close()
-          PY
-          python /tmp/hitl_browser_e2e.py | tee /tmp/hitl-browser-result.txt
+        run: python tests/acceptance/v05_hitl_browser.py | tee /tmp/hitl-browser-result.txt
 
-      - name: Collect HITL evidence
+      - name: Collect HITL logs
         if: always()
         shell: bash
         run: |
