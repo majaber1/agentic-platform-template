@@ -1,0 +1,296 @@
+name: v0.5 HITL Acceptance
+
+on:
+  push:
+    branches: [v0.5-open-source-first]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORGE_SHA: 048fdc658527b0dd60babbb65ee5729e3af1a79d
+  FORGE_ENVIRONMENT: development
+  FORGE_AUTH_REQUIRED: "true"
+  FORGE_ALLOW_OPEN_SIGNUP: "false"
+  FORGE_JWT_SECRET: hitl-acceptance-only-jwt-secret-change-me-1234567890
+  FORGE_BOOTSTRAP_ADMIN_EMAIL: hitl@forge.local
+  FORGE_BOOTSTRAP_ADMIN_PASSWORD: HitlAcceptancePass123!
+  FORGE_DEFAULT_MODEL: fake:echo
+  FORGE_PUBLIC_BASE_URL: http://127.0.0.1:8000
+  FORGE_PUBLIC_CONSOLE_URL: http://127.0.0.1:3000
+  NEXT_PUBLIC_FORGE_API_URL: ""
+
+jobs:
+  hitl-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout template branch
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Forge upstream
+        uses: actions/checkout@v4
+        with:
+          repository: nihalashetty/Forge
+          ref: ${{ env.FORGE_SHA }}
+          path: vendor/forge
+
+      - name: Verify Forge pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C vendor/forge rev-parse HEAD)" = "$FORGE_SHA"
+          grep -q "MIT License" vendor/forge/LICENSE
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: vendor/forge/apps/api/pyproject.toml
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: vendor/forge/pnpm-lock.yaml
+
+      - name: Install Forge
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          pip install -e "vendor/forge/apps/api[dev,all]"
+          pnpm -C vendor/forge install --frozen-lockfile
+
+      - name: Start Forge API
+        working-directory: vendor/forge/apps/api
+        shell: bash
+        run: |
+          nohup uvicorn forge.main:app --host 127.0.0.1 --port 8000 > /tmp/forge-hitl-api.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:8000/readyz >/tmp/hitl-ready.json; then cat /tmp/hitl-ready.json; exit 0; fi
+            sleep 2
+          done
+          cat /tmp/forge-hitl-api.log
+          exit 1
+
+      - name: Real HTTP HITL approve reject persistence and duplicate-resume gate
+        shell: bash
+        run: |
+          cat > /tmp/hitl_api_e2e.py <<'PY'
+          import json, httpx
+
+          BASE='http://127.0.0.1:8000'
+          EMAIL='hitl@forge.local'
+          PASSWORD='HitlAcceptancePass123!'
+
+          def auth_client():
+              c=httpx.Client(base_url=BASE, timeout=30)
+              r=c.post('/v1/auth/login',json={'email':EMAIL,'password':PASSWORD})
+              r.raise_for_status()
+              c.headers['Authorization']=f"Bearer {r.json()['access_token']}"
+              return c
+
+          c=auth_client()
+          p=c.post('/v1/projects',json={'name':'v0.5 HITL Acceptance Project'})
+          assert p.status_code==201,p.text
+          pid=p.json()['id']
+
+          executable={
+              'id':'v05_hitl_acceptance','version':1,
+              'state':{'messages':{'type':'list[message]','reducer':'add_messages'}},
+              'entry_node':'approval',
+              'nodes':[
+                  {'id':'approval','type':'human_input','config':{
+                      'prompt':'Approve v0.5 controlled action?',
+                      'allowed_decisions':['approve','reject']
+                  }},
+                  {'id':'end','type':'end','config':{}}
+              ],
+              'edges':[{'source':'approval','target':'end'}]
+          }
+          w=c.post(f'/v1/projects/{pid}/workflows',json={
+              'name':'v0.5 HITL Gate','description':'Runtime approval acceptance','executable':executable
+          })
+          assert w.status_code==201,w.text
+          wid=w.json()['id']
+          u=c.patch(f'/v1/projects/{pid}',json={'config':{'api_workflow_id':wid,'default_model':'fake:echo'}})
+          assert u.status_code==200,u.text
+
+          def start(label):
+              r=c.post(f'/v1/projects/{pid}/run',json={
+                  'input':{'messages':[{'role':'user','content':label}]},'stream':False
+              })
+              assert r.status_code==200,r.text
+              out=r.json()
+              assert out.get('interrupted') is True,out
+              assert out.get('thread_id'),out
+              assert out.get('run_id'),out
+              return out
+
+          approve_pending=start('approve path')
+          json.dump(approve_pending,open('/tmp/hitl-approve-pending.json','w'),indent=2)
+
+          # New login/client simulates a refresh/reopen boundary. The pending run must still be
+          # resumable from server-side persisted state using only the thread handle.
+          c.close(); c=auth_client()
+          r=c.post(f'/v1/projects/{pid}/run',json={
+              'thread_id':approve_pending['thread_id'],
+              'resume':{'value':'approve'},'stream':False
+          })
+          assert r.status_code==200,r.text
+          approved=r.json()
+          assert approved.get('interrupted') is not True,approved
+          assert approved.get('thread_id')==approve_pending['thread_id'],approved
+          json.dump(approved,open('/tmp/hitl-approved.json','w'),indent=2)
+
+          # Late/duplicate approval must not execute/resume again.
+          dup=c.post(f'/v1/projects/{pid}/run',json={
+              'thread_id':approve_pending['thread_id'],
+              'resume':{'value':'approve'},'stream':False
+          })
+          assert dup.status_code==409,(dup.status_code,dup.text)
+          json.dump({'status':dup.status_code,'body':dup.json()},open('/tmp/hitl-duplicate.json','w'),indent=2)
+
+          reject_pending=start('reject path')
+          json.dump(reject_pending,open('/tmp/hitl-reject-pending.json','w'),indent=2)
+          r=c.post(f'/v1/projects/{pid}/run',json={
+              'thread_id':reject_pending['thread_id'],
+              'resume':{'value':'reject'},'stream':False
+          })
+          assert r.status_code==200,r.text
+          rejected=r.json()
+          assert rejected.get('interrupted') is not True,rejected
+          json.dump(rejected,open('/tmp/hitl-rejected.json','w'),indent=2)
+
+          # Reopen persisted project/workflow after both decisions.
+          rp=c.get(f'/v1/projects/{pid}')
+          assert rp.status_code==200,rp.text
+          rw=c.get(f'/v1/projects/{pid}/workflows/{wid}')
+          assert rw.status_code==200,rw.text
+          assert rw.json()['executable']['nodes'][0]['type']=='human_input'
+          json.dump({'project_id':pid,'workflow_id':wid},open('/tmp/hitl-ids.json','w'),indent=2)
+          print('HITL_HTTP_E2E_PASS',pid,wid,approve_pending['run_id'],reject_pending['run_id'])
+          PY
+          python /tmp/hitl_api_e2e.py | tee /tmp/hitl-api-result.txt
+
+      - name: Start Forge web
+        working-directory: vendor/forge
+        shell: bash
+        run: |
+          nohup pnpm --filter web dev > /tmp/forge-hitl-web.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3000 >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/forge-hitl-web.log
+          exit 1
+
+      - name: Install Playwright Chromium
+        shell: bash
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Browser HITL pause approve reject and refresh probe
+        shell: bash
+        run: |
+          cat > /tmp/hitl_browser_e2e.py <<'PY'
+          import json
+          from playwright.sync_api import sync_playwright
+
+          with sync_playwright() as p:
+              b=p.chromium.launch()
+              page=b.new_page(viewport={'width':1440,'height':1000})
+              page.goto('http://127.0.0.1:3000',wait_until='networkidle')
+              page.get_by_text('Sign in to your workspace').wait_for(timeout=15000)
+              page.get_by_placeholder('you@company.com').fill('hitl@forge.local')
+              page.locator('input[type="password"]').fill('HitlAcceptancePass123!')
+              page.get_by_role('button',name='Sign in').click()
+              page.get_by_text('Welcome to Forge').wait_for(timeout=20000)
+              page.get_by_text('v0.5 HITL Acceptance Project',exact=True).first.click()
+              page.get_by_text('Playground',exact=True).first.click()
+              page.get_by_text('Playground',exact=True).wait_for(timeout=15000)
+              inp=page.get_by_placeholder('Message the workflow…')
+
+              # Approve path in the real Playground UI.
+              inp.fill('browser approve path')
+              inp.press('Enter')
+              page.get_by_text('Approval required',exact=True).wait_for(timeout=20000)
+              page.get_by_text('Approve v0.5 controlled action?',exact=True).wait_for(timeout=5000)
+              page.screenshot(path='/tmp/hitl-browser-pending-approve.png',full_page=True)
+              page.get_by_role('button',name='approve',exact=True).click()
+              page.get_by_text('Approval required',exact=True).wait_for(state='detached',timeout=15000)
+              page.screenshot(path='/tmp/hitl-browser-approved.png',full_page=True)
+
+              # Fresh UI thread then reject path.
+              page.get_by_role('button',name='Reset',exact=True).click()
+              inp.fill('browser reject path')
+              inp.press('Enter')
+              page.get_by_text('Approval required',exact=True).wait_for(timeout=20000)
+              page.get_by_role('button',name='reject',exact=True).click()
+              page.get_by_text('Approval required',exact=True).wait_for(state='detached',timeout=15000)
+              page.screenshot(path='/tmp/hitl-browser-rejected.png',full_page=True)
+
+              # Refresh probe: start another pending run, refresh the browser, and record whether
+              # Forge restores the approval card. This is intentionally a hard acceptance gate.
+              page.get_by_role('button',name='Reset',exact=True).click()
+              inp.fill('browser refresh persistence path')
+              inp.press('Enter')
+              page.get_by_text('Approval required',exact=True).wait_for(timeout=20000)
+              page.screenshot(path='/tmp/hitl-browser-before-refresh.png',full_page=True)
+              page.reload(wait_until='networkidle')
+              restored=False
+              try:
+                  page.get_by_text('Approval required',exact=True).wait_for(timeout=7000)
+                  restored=True
+              except Exception:
+                  restored=False
+              page.screenshot(path='/tmp/hitl-browser-after-refresh.png',full_page=True)
+              json.dump({'pending_approval_restored_after_refresh':restored},open('/tmp/hitl-browser-refresh.json','w'))
+              if not restored:
+                  raise AssertionError('Pending HITL approval is not restored after Playground refresh')
+              print('HITL_BROWSER_E2E_PASS')
+              b.close()
+          PY
+          python /tmp/hitl_browser_e2e.py | tee /tmp/hitl-browser-result.txt
+
+      - name: Collect HITL evidence
+        if: always()
+        shell: bash
+        run: |
+          cp /tmp/forge-hitl-api.log /tmp/hitl-forge-api.log 2>/dev/null || true
+          cp /tmp/forge-hitl-web.log /tmp/hitl-forge-web.log 2>/dev/null || true
+
+      - name: Upload HITL evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v05-hitl-acceptance-evidence
+          path: |
+            /tmp/hitl-ready.json
+            /tmp/hitl-api-result.txt
+            /tmp/hitl-approve-pending.json
+            /tmp/hitl-approved.json
+            /tmp/hitl-duplicate.json
+            /tmp/hitl-reject-pending.json
+            /tmp/hitl-rejected.json
+            /tmp/hitl-ids.json
+            /tmp/hitl-browser-pending-approve.png
+            /tmp/hitl-browser-approved.png
+            /tmp/hitl-browser-rejected.png
+            /tmp/hitl-browser-before-refresh.png
+            /tmp/hitl-browser-after-refresh.png
+            /tmp/hitl-browser-refresh.json
+            /tmp/hitl-browser-result.txt
+            /tmp/hitl-forge-api.log
+            /tmp/hitl-forge-web.log
+          if-no-files-found: ignore
