@@ -1,114 +1,86 @@
 # Agentic Platform Template
 
-A reusable, governed, open-source-first foundation for AI-native products.
+Reusable AI-agent platform template built with an **open-source-first, assemble-before-build** policy.
 
-**Live reference:** https://agentic-platform-template.vercel.app  
-**Runtime console:** https://agentic-platform-template.vercel.app/runtime
+## Version tracks
 
-The template exists to stop every AI project from rebuilding orchestration, tool boundaries, model routing, approval rules, evaluation, and governance differently.
+- **v0.4 governed runtime** — preserved at `release/v0.4-governed-runtime`.
+- **v0.5 open-source-first** — active work on `v0.5-open-source-first`.
 
-## Current working baseline — v0.4
+v0.5 does not rebuild a platform from scratch. It adopts proven upstream components, pins exact versions, and adds our governance, security, integration and domain layers around them.
 
-```text
-User / Product UI
-       |
-       v
-   LangGraph                 ACTIVE
-       |
-  +----+-----------------------+
-  |                            |
-  v                            v
-Local governed tools       MCP v2 Core              ACTIVE
-  |                            |
-  +-------- Action Policy -----+
-       read / write / approval
-               |
-               v
-       Model Gateway Adapter            READY / NOT CONFIGURED
-               |
-        Qwen / DeepSeek / Mistral       PROJECT CONFIG
-               |
-              vLLM
-               |
-      Observability + Evaluation        NEXT / SCAFFOLDED
-```
-
-## What is real today
-
-- Next.js production UI
-- real LangGraph request routing
-- scoped local tool registry
-- official MCP v2 client/server protocol path
-- governed remote MCP registry using operator-defined IDs rather than arbitrary URLs
-- OpenAI-compatible model gateway adapter for vLLM or another approved gateway
-- fail-closed write-action policy
-- bounded HMAC human-approval verification contract
-- request IDs and execution traces
-- runtime, MCP and policy self-tests
-- Promptfoo evaluation scaffold
-
-The template deliberately does **not** fake a model, memory system, external connector, or business write. Missing infrastructure stays `NOT_CONFIGURED`.
-
-## Live verification
+## v0.5 foundation
 
 ```text
-GET /api/health
-GET /api/runtime/status
-GET /api/runtime/selftest
-GET /api/mcp/selftest
-GET /api/policy/selftest
-POST /api/agent/run
+Product UI / Domain App / Forge Console
+                |
+                v
+        Forge platform foundation
+  UI + LangGraph + MCP + Tools + RAG
+  Memory + HITL + Auth/RBAC + Traces/Evals
+                |
+                v
+        LiteLLM OSS model router
+                |
+          +-----+------+
+          |            |
+        Groq       OpenRouter
 ```
 
-Try `platform status` or `mcp status` in `/runtime`. Normal AI questions will return `NOT_CONFIGURED` until a real model endpoint is supplied.
+### Adopted upstream components
 
-## Configure a real model
+- **Forge** — platform foundation. Pinned to the exact commit in `upstream/UPSTREAM_COMPONENTS.lock.json`.
+- **LiteLLM OSS core** — model-router foundation. Enterprise-licensed directories are explicitly excluded from our adopted surface.
 
-```env
-MODEL_GATEWAY_BASE_URL=https://your-approved-openai-compatible-endpoint
-DEFAULT_MODEL=your-model-name
-MODEL_GATEWAY_API_KEY=optional-if-required
+The upstream source remains upstream. We do **not** copy large codebases into this repository unless an approved ADR requires a maintained fork.
+
+## What we keep from our template
+
+- architecture governance
+- open-source admission policy
+- source-authority rules
+- security and approval rules
+- business/domain packs
+- production-readiness gates
+- E2E evidence requirements
+
+## What we stop rebuilding
+
+Do not create custom chat UI, workflow canvas, agent framework, MCP framework, generic memory, generic RAG, tracing, evaluation dashboard, auth/RBAC, or model-router infrastructure while the adopted upstream component satisfies the requirement.
+
+## Bootstrap v0.5
+
+Windows:
+
+```powershell
+./scripts/bootstrap-v05.ps1
+./scripts/run-v05.ps1
 ```
 
-## Configure approved remote MCP servers
-
-```env
-MCP_SERVERS_JSON=[{"id":"internal-tools","url":"https://mcp.example.com/mcp","tokenEnv":"INTERNAL_MCP_TOKEN","enabled":true}]
-INTERNAL_MCP_TOKEN=...
-```
-
-Runtime callers choose the configured **ID**, never an arbitrary URL.
-
-## Governed writes
-
-Read-only tools can run according to authorization policy. Sensitive write tools can declare `requiresApproval: true`; without a valid approval they fail closed. See `GOVERNED_ACTIONS.md`.
-
-## Mandatory governance
-
-Read before implementing a product:
-
-- `ARCHITECTURE_BASELINE.md`
-- `GOVERNANCE.md`
-- `AGENTS.md`
-- `OPEN_SOURCE_POLICY.md`
-- `SOURCE_AUTHORITY.md`
-- `SECURITY.md`
-- `EVALUATION.md`
-- `PRODUCTION_READINESS.md`
-- `PROJECT_START_PROMPT.md`
-- `TEMPLATE_STATUS.md`
-
-A feature is not DONE because code or mocks exist. Completion requires the applicable real UI, backend, persistence, integration, failure paths, authorization, E2E, and evaluation evidence.
-
-## Quick start
+Linux/macOS:
 
 ```bash
-npm install
-npm run dev
+./scripts/bootstrap-v05.sh
+./scripts/run-v05.sh
 ```
 
-Node 22 is the reference runtime. Open `http://localhost:3000`.
+The bootstrap checks out the **pinned Forge commit** under `vendor/forge` and never tracks that vendor checkout in this repository. The first local run uses Forge's offline `fake:echo` model so UI/runtime plumbing can be tested without provider keys.
+
+## Model routing
+
+Model providers are not hard-wired into agents. The target path is Forge → LiteLLM → Groq/OpenRouter. Provider keys and concrete model IDs are runtime configuration, never committed to Git.
+
+See:
+
+- `OPEN_SOURCE_FIRST.md`
+- `docs/architecture/V0.5_ARCHITECTURE_BASELINE.md`
+- `upstream/UPSTREAM_COMPONENTS.lock.json`
+- `V05_STATUS.md`
+
+## v0.4 production reference
+
+The existing Vercel reference deployment remains a v0.4 reference until v0.5 passes its own runtime/UI acceptance gate. v0.5 is not considered production merely because its upstream components are mature.
 
 ## License
 
-The template itself is MIT. Every added model, connector, MCP server, library, or copied component must pass `OPEN_SOURCE_POLICY.md` before adoption.
+This template is MIT. Upstream components retain their own licenses and notices. Every adopted component must pass `OPEN_SOURCE_POLICY.md`; public source code alone is not sufficient.

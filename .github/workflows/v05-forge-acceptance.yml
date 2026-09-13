@@ -1,0 +1,228 @@
+name: v0.5 Forge Acceptance
+
+on:
+  push:
+    branches: [v0.5-open-source-first]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORGE_SHA: 048fdc658527b0dd60babbb65ee5729e3af1a79d
+
+jobs:
+  forge-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FORGE_ENVIRONMENT: development
+      FORGE_AUTH_REQUIRED: "true"
+      FORGE_ALLOW_OPEN_SIGNUP: "false"
+      FORGE_JWT_SECRET: acceptance-only-jwt-secret-change-me-1234567890
+      FORGE_BOOTSTRAP_ADMIN_EMAIL: acceptance@forge.local
+      FORGE_BOOTSTRAP_ADMIN_PASSWORD: AcceptancePass123!
+      FORGE_DEFAULT_MODEL: fake:echo
+      FORGE_PUBLIC_BASE_URL: http://127.0.0.1:8000
+      FORGE_PUBLIC_CONSOLE_URL: http://127.0.0.1:3000
+      NEXT_PUBLIC_FORGE_API_URL: ""
+
+    steps:
+      - name: Checkout template branch
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Forge upstream
+        uses: actions/checkout@v4
+        with:
+          repository: nihalashetty/Forge
+          ref: ${{ env.FORGE_SHA }}
+          path: vendor/forge
+
+      - name: Verify upstream pin and license
+        shell: bash
+        run: |
+          test "$(git -C vendor/forge rev-parse HEAD)" = "$FORGE_SHA"
+          grep -q "MIT License" vendor/forge/LICENSE
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: vendor/forge/apps/api/pyproject.toml
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: vendor/forge/pnpm-lock.yaml
+
+      - name: Install Forge backend
+        working-directory: vendor/forge/apps/api
+        run: python -m pip install -U pip && pip install -e ".[dev,all]"
+
+      - name: Backend high-value tests
+        working-directory: vendor/forge
+        shell: bash
+        env:
+          FORGE_AUTH_REQUIRED: "false"
+          FORGE_ALLOW_OPEN_SIGNUP: "true"
+        run: |
+          set -euo pipefail
+          TESTS=(
+            apps/api/tests/test_auth.py
+            apps/api/tests/test_channels_hitl.py
+            apps/api/tests/test_project_run_endpoint.py
+          )
+          while IFS= read -r f; do TESTS+=("$f"); done < <(find apps/api/tests -maxdepth 1 -type f -iname '*mcp*.py' | sort)
+          pytest -q "${TESTS[@]}"
+
+      - name: Install Forge frontend
+        working-directory: vendor/forge
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend tests
+        working-directory: vendor/forge
+        run: pnpm --filter web test
+
+      - name: Frontend production build
+        working-directory: vendor/forge
+        run: pnpm --filter web build
+
+      - name: Start Forge API
+        working-directory: vendor/forge/apps/api
+        shell: bash
+        run: |
+          nohup uvicorn forge.main:app --host 127.0.0.1 --port 8000 > /tmp/forge-api.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:8000/readyz >/tmp/ready.json; then cat /tmp/ready.json; exit 0; fi
+            sleep 2
+          done
+          cat /tmp/forge-api.log
+          exit 1
+
+      - name: Login and project persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOGIN=$(curl -fsS -X POST http://127.0.0.1:8000/v1/auth/login \
+            -H 'content-type: application/json' \
+            -d '{"email":"acceptance@forge.local","password":"AcceptancePass123!"}')
+          TOKEN=$(python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])' <<<"$LOGIN")
+          curl -fsS -X POST http://127.0.0.1:8000/v1/projects \
+            -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+            -d '{"name":"v0.5 Acceptance Project"}' >/tmp/project.json
+          curl -fsS http://127.0.0.1:8000/v1/projects \
+            -H "Authorization: Bearer $TOKEN" >/tmp/projects.json
+          python - <<'PY'
+          import json
+          rows=json.load(open('/tmp/projects.json'))
+          assert any(p.get('name')=='v0.5 Acceptance Project' for p in rows), rows
+          print('PROJECT_PERSISTENCE_PASS', len(rows))
+          PY
+          curl -fsS http://127.0.0.1:8000/v1/models \
+            -H "Authorization: Bearer $TOKEN" >/tmp/models.json
+          grep -q 'fake:echo' /tmp/models.json
+
+      - name: Live fake-agent workflow E2E
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, httpx
+          base='http://127.0.0.1:8000'
+          login=httpx.post(f'{base}/v1/auth/login', json={'email':'acceptance@forge.local','password':'AcceptancePass123!'}, timeout=20)
+          login.raise_for_status()
+          h={'Authorization': f"Bearer {login.json()['access_token']}"}
+          pid=json.load(open('/tmp/project.json'))['id']
+          wf={
+              'id':'v05_live_agent','version':1,
+              'state':{'messages':{'type':'list[message]','reducer':'add_messages'}},
+              'entry_node':'agent',
+              'nodes':[
+                  {'id':'agent','type':'agent','config':{'flavor':'agent','model':'fake:V0.5 live agent PASS','tools':[]}},
+                  {'id':'end','type':'end','config':{}}
+              ],
+              'edges':[{'source':'agent','target':'end'}]
+          }
+          r=httpx.post(f'{base}/v1/projects/{pid}/workflows',json={'name':'v0.5 Live Agent','description':'Acceptance E2E','executable':wf},headers=h,timeout=20)
+          assert r.status_code==201,r.text
+          created=r.json(); wid=created['id']
+          json.dump(created,open('/tmp/workflow.json','w'))
+          r=httpx.patch(f'{base}/v1/projects/{pid}',json={'config':{'api_workflow_id':wid,'default_model':'fake:echo'}},headers=h,timeout=20)
+          assert r.status_code==200,r.text
+          r=httpx.post(f'{base}/v1/projects/{pid}/run',json={'input':{'messages':[{'role':'user','content':'Run live acceptance'}]},'stream':False},headers=h,timeout=30)
+          assert r.status_code==200,r.text
+          out=r.json(); assert out.get('status')=='done',out
+          assert 'V0.5 live agent PASS' in (out.get('answer') or ''),out
+          tid=out.get('thread_id'); assert tid,out
+          json.dump(out,open('/tmp/live-run.json','w'))
+          r2=httpx.post(f'{base}/v1/projects/{pid}/run',json={'thread_id':tid,'input':{'messages':[{'role':'user','content':'Continue same thread'}]},'stream':False},headers=h,timeout=30)
+          assert r2.status_code==200,r2.text
+          assert r2.json().get('thread_id')==tid,r2.json()
+          reopen=httpx.get(f'{base}/v1/projects/{pid}/workflows/{wid}',headers=h,timeout=20)
+          assert reopen.status_code==200,reopen.text
+          assert reopen.json()['name']=='v0.5 Live Agent'
+          print('LIVE_FAKE_AGENT_E2E_PASS',wid,tid)
+          PY
+
+      - name: Start Forge web
+        working-directory: vendor/forge
+        shell: bash
+        run: |
+          nohup pnpm --filter web dev > /tmp/forge-web.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3000 >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/forge-web.log
+          exit 1
+
+      - name: Install Playwright browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Browser login and owner smoke
+        shell: bash
+        run: |
+          cat >/tmp/browser_smoke.py <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              browser=p.chromium.launch()
+              page=browser.new_page(viewport={'width':1440,'height':1000})
+              page.goto('http://127.0.0.1:3000',wait_until='networkidle')
+              page.get_by_text('Sign in to your workspace').wait_for(timeout=15000)
+              page.get_by_placeholder('you@company.com').fill('acceptance@forge.local')
+              page.locator('input[type="password"]').fill('AcceptancePass123!')
+              page.get_by_role('button',name='Sign in').click()
+              page.get_by_text('Welcome to Forge').wait_for(timeout=20000)
+              page.get_by_text('v0.5 Acceptance Project',exact=True).first.wait_for(timeout=20000)
+              page.screenshot(path='/tmp/v05-forge-owner-smoke.png',full_page=True)
+              print('BROWSER_OWNER_SMOKE_PASS')
+              browser.close()
+          PY
+          python /tmp/browser_smoke.py
+
+      - name: Collect Forge evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v05-forge-acceptance-evidence
+          path: |
+            /tmp/v05-forge-owner-smoke.png
+            /tmp/forge-api.log
+            /tmp/forge-web.log
+            /tmp/ready.json
+            /tmp/project.json
+            /tmp/projects.json
+            /tmp/models.json
+            /tmp/workflow.json
+            /tmp/live-run.json
+          if-no-files-found: ignore

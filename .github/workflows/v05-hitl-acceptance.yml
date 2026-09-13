@@ -1,0 +1,156 @@
+name: v0.5 HITL Acceptance
+
+on:
+  push:
+    branches: [v0.5-open-source-first]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORGE_SHA: 048fdc658527b0dd60babbb65ee5729e3af1a79d
+  FORGE_ENVIRONMENT: development
+  FORGE_AUTH_REQUIRED: "true"
+  FORGE_ALLOW_OPEN_SIGNUP: "false"
+  FORGE_BOOTSTRAP_ADMIN_EMAIL: hitl@forge.local
+  FORGE_DEFAULT_MODEL: fake:echo
+  FORGE_PUBLIC_BASE_URL: http://127.0.0.1:8000
+  FORGE_PUBLIC_CONSOLE_URL: http://127.0.0.1:3000
+  NEXT_PUBLIC_FORGE_API_URL: ""
+  HITL_EVIDENCE_DIR: /tmp
+
+jobs:
+  hitl-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout template branch
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Forge upstream
+        uses: actions/checkout@v4
+        with:
+          repository: nihalashetty/Forge
+          ref: ${{ env.FORGE_SHA }}
+          path: vendor/forge
+
+      - name: Verify pin and apply governed customizations
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C vendor/forge rev-parse HEAD)" = "$FORGE_SHA"
+          grep -q "MIT License" vendor/forge/LICENSE
+          python scripts/apply-v05-forge-customizations.py vendor/forge
+          git -C vendor/forge diff --check
+          grep -q 'forge:playground:pending-run:' vendor/forge/apps/web/components/screens/playground.tsx
+
+      - name: Generate masked ephemeral acceptance credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          PASSWORD="Aa1!$(python -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          JWT_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          echo "::add-mask::$PASSWORD"
+          echo "::add-mask::$JWT_SECRET"
+          echo "HITL_TEST_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+          echo "FORGE_BOOTSTRAP_ADMIN_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+          echo "FORGE_JWT_SECRET=$JWT_SECRET" >> "$GITHUB_ENV"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: vendor/forge/apps/api/pyproject.toml
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: vendor/forge/pnpm-lock.yaml
+
+      - name: Install Forge
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          pip install -e "vendor/forge/apps/api[dev,all]"
+          pnpm -C vendor/forge install --frozen-lockfile
+
+      - name: Start Forge API
+        working-directory: vendor/forge/apps/api
+        shell: bash
+        run: |
+          nohup uvicorn forge.main:app --host 127.0.0.1 --port 8000 > /tmp/forge-hitl-api.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:8000/readyz >/tmp/hitl-ready.json; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/forge-hitl-api.log
+          exit 1
+
+      - name: Real HTTP HITL acceptance
+        shell: bash
+        run: python tests/acceptance/v05_hitl_api.py | tee /tmp/hitl-api-result.txt
+
+      - name: Start Forge web
+        working-directory: vendor/forge
+        shell: bash
+        run: |
+          nohup pnpm --filter web dev > /tmp/forge-hitl-web.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3000 >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          cat /tmp/forge-hitl-web.log
+          exit 1
+
+      - name: Install Playwright Chromium
+        shell: bash
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Browser HITL acceptance
+        shell: bash
+        run: python tests/acceptance/v05_hitl_browser.py | tee /tmp/hitl-browser-result.txt
+
+      - name: Collect HITL logs
+        if: always()
+        shell: bash
+        run: |
+          cp /tmp/forge-hitl-api.log /tmp/hitl-forge-api.log 2>/dev/null || true
+          cp /tmp/forge-hitl-web.log /tmp/hitl-forge-web.log 2>/dev/null || true
+
+      - name: Upload HITL evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v05-hitl-acceptance-evidence
+          path: |
+            /tmp/hitl-ready.json
+            /tmp/hitl-api-result.txt
+            /tmp/hitl-approve-pending.json
+            /tmp/hitl-approved.json
+            /tmp/hitl-duplicate.json
+            /tmp/hitl-reject-pending.json
+            /tmp/hitl-rejected.json
+            /tmp/hitl-ids.json
+            /tmp/hitl-browser-pending-approve.png
+            /tmp/hitl-browser-approved.png
+            /tmp/hitl-browser-rejected.png
+            /tmp/hitl-browser-before-refresh.png
+            /tmp/hitl-browser-after-refresh.png
+            /tmp/hitl-browser-refresh.json
+            /tmp/hitl-browser-result.txt
+            /tmp/hitl-forge-api.log
+            /tmp/hitl-forge-web.log
+          if-no-files-found: ignore
