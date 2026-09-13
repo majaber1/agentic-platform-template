@@ -28,16 +28,10 @@ PY
 done
 
 FORGE_DIR="$ROOT/vendor/forge"
-FORGE_PATCH="$ROOT/patches/forge/0001-playground-hitl-run-reattach.patch"
-if [[ -d "$FORGE_DIR/.git" && -f "$FORGE_PATCH" ]]; then
-  if git -C "$FORGE_DIR" apply --reverse --check "$FORGE_PATCH" >/dev/null 2>&1; then
-    echo "[v0.5] Forge governed patch already applied"
-  else
-    git -C "$FORGE_DIR" apply --check "$FORGE_PATCH"
-    git -C "$FORGE_DIR" apply "$FORGE_PATCH"
-    git -C "$FORGE_DIR" diff --check
-    echo "[v0.5] Applied Forge HITL refresh reattach patch"
-  fi
+if [[ -d "$FORGE_DIR/.git" ]]; then
+  python3 "$ROOT/scripts/apply-v05-forge-customizations.py" "$FORGE_DIR"
+  git -C "$FORGE_DIR" diff --check
+  echo "[v0.5] Governed Forge customizations verified"
 fi
 
 echo
